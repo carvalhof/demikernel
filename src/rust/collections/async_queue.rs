@@ -31,7 +31,7 @@ use ::std::{
 //======================================================================================================================
 
 // The following value was chosen arbitrarily.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 //======================================================================================================================
 // Structures
