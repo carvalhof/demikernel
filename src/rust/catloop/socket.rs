@@ -46,7 +46,7 @@ use ::std::{
 #[cfg(debug_assertions)]
 const REQUEST_ID_SEED: u64 = 95;
 /// Amount of time to wait for the other end in milliseconds. This was chosen arbitrarily.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 //======================================================================================================================
 // Structures
