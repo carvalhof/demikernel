@@ -67,6 +67,12 @@ ifeq ($(PROFILER),yes)
 CARGO_FEATURES += --features=profiler
 endif
 
+# Switch for multithread.
+export MULTITHREAD=no
+ifeq ($(MULTITHREAD),yes)
+CARGO_FEATURES += --features=multithread
+endif
+
 CARGO_FEATURES += $(FEATURES)
 
 #=======================================================================================================================

@@ -44,6 +44,8 @@ pub struct demi_sgarray_t {
     pub sga_addr: SockAddr,
 }
 
+unsafe impl Send for demi_sgarray_t {}
+
 #[cfg(test)]
 mod test {
 
