@@ -19,8 +19,8 @@ class BaseTest(metaclass=ABCMeta):
         raise NotImplementedError
 
     def job_test_system_rust(self, test_alias, test_name, repo, libos, is_debug, server, client, server_args,
-                             client_args, is_sudo, all_pass, delay, config_path, log_directory):
+                             client_args, is_sudo, all_pass, delay, config_path, enable_multithread, log_directory):
         if self.callback:
             return self.callback(test_alias, test_name, repo, libos, is_debug, server, client, server_args,
-                                 client_args, is_sudo, all_pass, delay, config_path, log_directory)
+                                 client_args, is_sudo, all_pass, delay, config_path, enable_multithread, log_directory)
         return True

@@ -21,4 +21,4 @@ class PipeOpenTest(BaseTest):
         self.has_test_passed = self.job_test_system_rust(
             test_alias, self.test_name, s["repository"], s["libos"], s["is_debug"], s["server_name"],
             s["client_name"], server_args, client_args, s["is_sudo"], True, s["delay"], s["config_path"],
-            s["log_directory"])
+            s["enable_multithread"], s["log_directory"])

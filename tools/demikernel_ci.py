@@ -261,15 +261,15 @@ def job_checkout_windows(repository: str, branch: str, server: str, client: str,
 
 
 def job_compile(
-        repository: str, libos: str, is_debug: bool, server: str, client: str, enable_nfs: bool,
+        repository: str, libos: str, is_debug: bool, server: str, client: str, enable_nfs: bool, enable_multithread: str,
         log_directory: str) -> bool:
     jobs: dict[str, subprocess.Popen[str]] = {}
     test_name = "compile-{}".format("debug" if is_debug else "release")
     jobs[test_name + "-server-" + server] = remote_compile(
-        server, repository, "all LIBOS={}".format(libos), is_debug)
+        server, repository, "all MULTITHREAD={} LIBOS={}".format(enable_multithread, libos), is_debug)
     if not enable_nfs:
         jobs[test_name + "-client-" + client] = remote_compile(client,
-                                                               repository, "all LIBOS={}".format(libos), is_debug)
+                                                               repository, "all MULTITHREAD={} LIBOS={}".format(enable_multithread, libos), is_debug)
     return wait_and_report(test_name, log_directory, jobs)
 
 
@@ -288,12 +288,12 @@ def job_compile_windows(
 
 def job_test_system_rust(
         test_alias: str, test_name: str, repo: str, libos: str, is_debug: bool, server: str, client: str,
-        server_args: str, client_args: str, is_sudo: bool, all_pass: bool, delay: float, config_path: str,
+        server_args: str, client_args: str, is_sudo: bool, all_pass: bool, delay: float, config_path: str, enable_multithread: str,
         log_directory: str) -> bool:
-    server_cmd: str = "test-system-rust LIBOS={} TEST={} ARGS=\\\"{}\\\"".format(
-        libos, test_name, server_args)
-    client_cmd: str = "test-system-rust LIBOS={} TEST={} ARGS=\\\"{}\\\"".format(
-        libos, test_name, client_args)
+    server_cmd: str = "test-system-rust MULTITHREAD={} LIBOS={} TEST={} ARGS=\\\"{}\\\"".format(
+        enable_multithread, libos, test_name, server_args)
+    client_cmd: str = "test-system-rust MULTITHREAD={} LIBOS={} TEST={} ARGS=\\\"{}\\\"".format(
+        enable_multithread, libos, test_name, client_args)
     jobs: dict[str, subprocess.Popen[str]] = {}
     jobs[test_alias + "-server-" +
          server] = remote_run(server, repo, is_debug, server_cmd, is_sudo, config_path)
@@ -321,9 +321,11 @@ def job_test_system_rust_windows(
 
 
 def job_test_unit_rust(repo: str, libos: str, is_debug: bool, server: str, client: str,
-                       is_sudo: bool, config_path: str, log_directory: str) -> bool:
-    server_cmd: str = "test-unit-rust LIBOS={}".format(libos)
-    client_cmd: str = "test-unit-rust LIBOS={}".format(libos)
+                       is_sudo: bool, config_path: str, enable_multithread: str, log_directory: str) -> bool:
+    server_cmd: str = "test-unit-rust MULTITHREAD={} LIBOS={}".format(
+        enable_multithread, libos)
+    client_cmd: str = "test-unit-rust MULTITHREAD={} LIBOS={}".format(
+        enable_multithread, libos)
     test_name = "unit-test"
     jobs: dict[str, subprocess.Popen[str]] = {}
     jobs[test_name + "-server-" +
@@ -346,15 +348,15 @@ def job_test_unit_rust_windows(repo: str, libos: str, is_debug: bool, server: st
 
 def job_test_integration_tcp_rust(
         repo: str, libos: str, is_debug: bool, server: str, client: str, server_addr: str, client_addr: str,
-        is_sudo: bool, config_path: str, log_directory: str) -> bool:
+        is_sudo: bool, config_path: str, enable_multithread: str, log_directory: str) -> bool:
     server_args: str = "--local-address {}:12345 --remote-address {}:23456".format(
         server_addr, client_addr)
     client_args: str = "--local-address {}:23456 --remote-address {}:12345".format(
         client_addr, server_addr)
-    server_cmd: str = "test-integration-rust TEST_INTEGRATION=tcp-test LIBOS={} ARGS=\\\"{}\\\"".format(
-        libos, server_args)
-    client_cmd: str = "test-integration-rust TEST_INTEGRATION=tcp-test LIBOS={} ARGS=\\\"{}\\\"".format(
-        libos, client_args)
+    server_cmd: str = "test-integration-rust MULTITHREAD={} TEST_INTEGRATION=tcp-test LIBOS={} ARGS=\\\"{}\\\"".format(
+        enable_multithread, libos, server_args)
+    client_cmd: str = "test-integration-rust MULTITHREAD={} TEST_INTEGRATION=tcp-test LIBOS={} ARGS=\\\"{}\\\"".format(
+        enable_multithread, libos, client_args)
     test_name = "integration-test"
     jobs: dict[str, subprocess.Popen[str]] = {}
     jobs[test_name + "-server-" +
@@ -387,15 +389,15 @@ def job_test_integration_tcp_rust_windows(
 
 def job_test_integration_pipe_rust(
         repo: str, libos: str, is_debug: bool, run_mode: str, server: str, client: str, server_addr: str,
-        delay: float, is_sudo: bool, config_path: str, log_directory: str) -> bool:
+        delay: float, is_sudo: bool, config_path: str, enable_multithread: str, log_directory: str) -> bool:
     server_args: str = "--peer server --pipe-name {}:12345 --run-mode {}".format(
         server_addr, run_mode)
     client_args: str = "--peer client --pipe-name {}:12345 --run-mode {}".format(
         server_addr, run_mode)
-    server_cmd: str = "test-integration-rust TEST_INTEGRATION=pipe-test LIBOS={} ARGS=\\\"{}\\\"".format(
-        libos, server_args)
-    client_cmd: str = "test-integration-rust TEST_INTEGRATION=pipe-test LIBOS={} ARGS=\\\"{}\\\"".format(
-        libos, client_args)
+    server_cmd: str = "test-integration-rust MULTITHREAD={} TEST_INTEGRATION=pipe-test LIBOS={} ARGS=\\\"{}\\\"".format(
+        enable_multithread, libos, server_args)
+    client_cmd: str = "test-integration-rust MULTITHREAD={} TEST_INTEGRATION=pipe-test LIBOS={} ARGS=\\\"{}\\\"".format(
+        enable_multithread, libos, client_args)
     test_name = "integration-test" + "-" + run_mode
     jobs: dict[str, subprocess.Popen[str]] = {}
     jobs[test_name + "-server-" +
@@ -435,7 +437,7 @@ def job_cleanup_windows(repository: str, server: str, client: str, is_sudo: bool
 def run_pipeline(
         repository: str, branch: str, libos: str, is_debug: bool, server: str, client: str,
         test_unit: bool, test_system: str, server_addr: str, client_addr: str, delay: float, config_path: str,
-        output_dir: str, enable_nfs: bool) -> int:
+        output_dir: str, enable_nfs: bool, enable_multithread: str) -> int:
     is_sudo: bool = True if libos == "catnip" or libos == "catpowder" or libos == "catloop" else False
     step: int = 0
     status: dict[str, bool] = {}
@@ -498,38 +500,38 @@ def run_pipeline(
     # STEP 2: Compile debug.
     if status["checkout"]:
         status["compile"] = job_compile(
-            repository, libos, is_debug, server, client, enable_nfs, log_directory)
+            repository, libos, is_debug, server, client, enable_nfs, enable_multithread, log_directory)
 
     # STEP 3: Run unit tests.
     if test_unit:
         if status["checkout"] and status["compile"]:
             status["unit_tests"] = job_test_unit_rust(repository, libos, is_debug, server, client,
-                                                      is_sudo, config_path, log_directory)
+                                                      is_sudo, config_path, enable_multithread, log_directory)
             if libos == "catnap" or libos == "catloop":
                 status["integration_tests"] = job_test_integration_tcp_rust(
-                    repository, libos, is_debug, server, client, server_addr, client_addr, is_sudo, config_path, log_directory)
+                    repository, libos, is_debug, server, client, server_addr, client_addr, is_sudo, config_path, enable_multithread, log_directory)
             elif libos == "catmem":
                 status["integration_tests"] = job_test_integration_pipe_rust(
                     repository, libos, is_debug, "standalone", server, client, server_addr, delay, is_sudo,
-                    config_path, log_directory)
+                    config_path, enable_multithread, log_directory)
                 status["integration_tests"] = job_test_integration_pipe_rust(
                     repository, libos, is_debug, "push-wait", server, client, server_addr, delay, is_sudo,
-                    config_path, log_directory)
+                    config_path, enable_multithread, log_directory)
                 status["integration_tests"] = job_test_integration_pipe_rust(
                     repository, libos, is_debug, "pop-wait", server, client, server_addr, delay, is_sudo,
-                    config_path, log_directory)
+                    config_path, enable_multithread, log_directory)
                 status["integration_tests"] = job_test_integration_pipe_rust(
                     repository, libos, is_debug, "push-wait-async", server, client, server_addr, delay, is_sudo,
-                    config_path, log_directory)
+                    config_path, enable_multithread, log_directory)
                 status["integration_tests"] = job_test_integration_pipe_rust(
                     repository, libos, is_debug, "pop-wait-async", server, client, server_addr, delay, is_sudo,
-                    config_path, log_directory)
+                    config_path, enable_multithread, log_directory)
 
     # STEP 4: Run system tests.
     if test_system:
         if status["checkout"] and status["compile"]:
             scaffolding: dict = create_scaffolding(libos, server, server_addr, client, client_addr, is_debug, is_sudo,
-                                                   repository, delay, config_path, log_directory)
+                                                   repository, delay, config_path, enable_multithread, log_directory)
             ci_map: CIMap = get_ci_map()
             test_names: List = get_tests_to_run(
                 scaffolding, ci_map) if test_system == "all" else [test_system]
@@ -550,7 +552,7 @@ def run_pipeline(
 
 
 def create_scaffolding(libos: str, server_name: str, server_addr: str, client_name: str, client_addr: str,
-                       is_debug: bool, is_sudo: bool, repository: str, delay: float, config_path: str,
+                       is_debug: bool, is_sudo: bool, repository: str, delay: float, config_path: str, enable_multithread: str,
                        log_directory: str) -> dict:
     return {
         "libos": libos,
@@ -563,7 +565,8 @@ def create_scaffolding(libos: str, server_name: str, server_addr: str, client_na
         "repository": repository,
         "delay": delay,
         "config_path": config_path,
-        "log_directory": log_directory
+        "log_directory": log_directory,
+        "enable_multithread": enable_multithread
     }
 
 
@@ -622,6 +625,8 @@ def read_args() -> argparse.Namespace:
                         help="set delay between server and host for system-level tests")
     parser.add_argument("--enable-nfs", required=False, default=False,
                         action="store_true", help="enable building on nfs directories")
+    parser.add_argument("--enable-multithread", required=False, default=False,
+                        action="store_true", help="enable multithread build")
 
     # Test options.
     parser.add_argument("--test-unit", action='store_true',
@@ -664,6 +669,7 @@ def main():
     delay: float = args.delay
     config_path: str = args.config_path
     enable_nfs: bool = args.enable_nfs
+    enable_multithread: str = "yes" if not args.enable_multithread else "no"
 
     # Extract test options.
     test_unit: bool = args.test_unit
@@ -685,7 +691,7 @@ def main():
 
     status: dict = run_pipeline(repository, branch, libos, is_debug, server,
                                 client, test_unit, test_system, server_addr,
-                                client_addr, delay, config_path, output_dir, enable_nfs)
+                                client_addr, delay, config_path, output_dir, enable_nfs, enable_multithread)
     if False in status.values():
         sys.exit(-1)
     else:

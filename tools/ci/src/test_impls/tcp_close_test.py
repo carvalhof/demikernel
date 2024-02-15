@@ -19,15 +19,15 @@ class TcpCloseTest(BaseTest):
         s = self.scaffolding
         self.has_test_passed = self.job_test_system_rust(
             test_alias, self.test_name, s["repository"], s["libos"], s["is_debug"], s["server_name"], s["client_name"],
-            server_args, client_args, s["is_sudo"], True, s["delay"], s["config_path"], s["log_directory"])
+            server_args, client_args, s["is_sudo"], True, s["delay"], s["config_path"], s["enable_multithread"], s["log_directory"])
 
     def __make_test_alias(self, params):
         return f"tcp-close-{params['run_mode']}-{params['who_closes']}-closes-sockets"
 
     def __make_server_args(self, params):
         return f"--peer server --address {self.scaffolding['server_ip']}:12345 --nclients {params['nclients']} " \
-                f"--run-mode {params['run_mode']} --whocloses {params['who_closes']}"
+            f"--run-mode {params['run_mode']} --whocloses {params['who_closes']}"
 
     def __make_client_args(self, params):
         return f"--peer client --address {self.scaffolding['server_ip']}:12345 --nclients {params['nclients']} "\
-                f"--run-mode {params['run_mode']} --whocloses {params['who_closes']}"
+            f"--run-mode {params['run_mode']} --whocloses {params['who_closes']}"

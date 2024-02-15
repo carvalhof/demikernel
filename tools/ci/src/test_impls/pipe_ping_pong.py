@@ -14,10 +14,12 @@ class PipePingPongTest(BaseTest):
     def run_scenario(self):
         test_alias = "pipe-ping-pong"
         pipe_name: str = "demikernel-test-pipe-ping-pong"
-        server_args: str = "--server demikernel-test-pipe-ping-pong".format(pipe_name)
-        client_args: str = "--client demikernel-test-pipe-ping-pong".format(pipe_name)
+        server_args: str = "--server demikernel-test-pipe-ping-pong".format(
+            pipe_name)
+        client_args: str = "--client demikernel-test-pipe-ping-pong".format(
+            pipe_name)
         s = self.scaffolding
         self.has_test_passed = self.job_test_system_rust(
             test_alias, self.test_name, s["repository"], s["libos"], s["is_debug"], s["server_name"],
             s["client_name"], server_args, client_args, s["is_sudo"], True, s["delay"], s["config_path"],
-            s["log_directory"])
+            s["enable_multithread"], s["log_directory"])
