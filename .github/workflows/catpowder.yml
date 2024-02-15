@@ -28,7 +28,7 @@ env:
 jobs:
 
   debug-pipeline:
-    name: Debug Pipeline
+    name: Single Core Debug Pipeline
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
@@ -70,7 +70,7 @@ jobs:
 
 
   release-pipeline:
-    name: Release Pipeline
+    name: Single Core Release Pipeline
     needs: debug-pipeline
     runs-on: ubuntu-latest
     steps:
@@ -108,6 +108,93 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: release-pipeline-logs
+        path: |
+          **/*.stdout.txt
+          **/*.stderr.txt
+
+  multithread-debug-pipeline:
+    name: Multithread Debug Pipeline
+    needs: release-pipeline
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Setup SSH
+      shell: bash
+      run: |
+        mkdir -p $HOME/.ssh/
+        echo "${{ secrets.SSHKEY }}" > "$HOME/.ssh/id_rsa"
+        chmod 400 $HOME/.ssh/id_rsa
+        echo "Host *" > $HOME/.ssh/config
+        echo -e "\tStrictHostKeyChecking no" >> $HOME/.ssh/config
+        echo -e "\tIdentityFile $HOME/.ssh/id_rsa" >> $HOME/.ssh/config
+        echo -e "\tIdentitiesOnly yes" >> $HOME/.ssh/config
+        echo -e "\tPasswordAuthentication no" >> $HOME/.ssh/config
+        echo -e "\tUser ${{ secrets.USERNAME }}" >> $HOME/.ssh/config
+        echo -e "\tPort ${{ secrets.PORTNUM }}" >> $HOME/.ssh/config
+    - name: Run
+      run: |
+        pip install --pre azure-data-tables
+        python3 tools/demikernel_ci.py \
+          --server $SERVER \
+          --client $CLIENT \
+          --repository demikernel \
+          --branch origin/${{ github.ref_name }} \
+          --libos $LIBOS \
+          --debug \
+          --enable-multithread \
+          --test-unit --test-system all --delay 2 --enable-nfs \
+          --server-addr $SERVER_ADDR \
+          --client-addr $CLIENT_ADDR
+    - name: Archive Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: multithread-debug-pipeline-logs
+        path: |
+          **/*.stdout.txt
+          **/*.stderr.txt
+
+  multithread-release-pipeline:
+    name: Multithread Release Pipeline
+    needs: multithread-debug-pipeline
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Setup SSH
+      shell: bash
+      run: |
+        mkdir -p $HOME/.ssh/
+        echo "${{ secrets.SSHKEY }}" > "$HOME/.ssh/id_rsa"
+        chmod 400 $HOME/.ssh/id_rsa
+        echo "Host *" > $HOME/.ssh/config
+        echo -e "\tStrictHostKeyChecking no" >> $HOME/.ssh/config
+        echo -e "\tIdentityFile $HOME/.ssh/id_rsa" >> $HOME/.ssh/config
+        echo -e "\tIdentitiesOnly yes" >> $HOME/.ssh/config
+        echo -e "\tPasswordAuthentication no" >> $HOME/.ssh/config
+        echo -e "\tUser ${{ secrets.USERNAME }}" >> $HOME/.ssh/config
+        echo -e "\tPort ${{ secrets.PORTNUM }}" >> $HOME/.ssh/config
+    - name: Run
+      run: |
+        pip install --pre azure-data-tables
+        python3 tools/demikernel_ci.py \
+          --server $SERVER \
+          --client $CLIENT \
+          --repository demikernel \
+          --branch origin/${{ github.ref_name }} \
+          --libos $LIBOS \
+          --enable-multithread \
+          --test-unit --test-system all --delay 2 --enable-nfs \
+          --server-addr $SERVER_ADDR \
+          --client-addr $CLIENT_ADDR \
+          --connection-string "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+          --table-name ${{ secrets.AZURE_STORAGE_TABLE_NAME }}
+    - name: Archive Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: multithread-release-pipeline-logs
         path: |
           **/*.stdout.txt
           **/*.stderr.txt
