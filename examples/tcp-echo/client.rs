@@ -91,7 +91,6 @@ impl TcpEchoClient {
         nclients: usize,
         nrequests: Option<usize>,
     ) -> Result<()> {
-        let start: Instant = Instant::now();
         let mut last_log: Instant = Instant::now();
 
         // Open all connections.
@@ -131,10 +130,10 @@ impl TcpEchoClient {
             // Dump statistics.
             if let Some(log_interval) = log_interval {
                 if last_log.elapsed() > Duration::from_secs(log_interval) {
-                    let time_elapsed: f64 = (Instant::now() - start).as_secs() as f64;
+                    let time_elapsed: f64 = (Instant::now() - last_log).as_secs() as f64;
                     let nrequests: f64 = (self.nbytes / self.bufsize) as f64;
                     let rps: f64 = nrequests / time_elapsed;
-                    println!("INFO: {:?} ns, {:?} rps, {:?} requests", time_elapsed, rps, nrequests);
+                    println!("INFO: {:?} s, {:2?} rps, {:?} requests", time_elapsed, rps, nrequests);
                     last_log = Instant::now();
                     self.nbytes = 0;
                 }
