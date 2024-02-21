@@ -136,6 +136,7 @@ impl TcpEchoClient {
                     let rps: u64 = nrequests / time_elapsed;
                     println!("INFO: {:?} rps", rps);
                     last_log = Instant::now();
+                    self.nbytes = 0;
                 }
             }
 
@@ -227,6 +228,7 @@ impl TcpEchoClient {
                     let rps: u64 = nrequests / time_elapsed;
                     println!("INFO: {:?} rps", rps);
                     last_log = Instant::now();
+                    self.nbytes = 0;
                 }
             }
 
