@@ -131,9 +131,9 @@ impl TcpEchoClient {
             // Dump statistics.
             if let Some(log_interval) = log_interval {
                 if last_log.elapsed() > Duration::from_secs(log_interval) {
-                    let time_elapsed: u64 = (Instant::now() - start).as_nanos() as u64;
-                    let nrequests: u64 = (self.nbytes / self.bufsize) as u64;
-                    let rps: u64 = nrequests / time_elapsed;
+                    let time_elapsed: f64 = (Instant::now() - start).as_secs() as f64;
+                    let nrequests: f64 = (self.nbytes / self.bufsize) as f64;
+                    let rps: f64 = nrequests / time_elapsed;
                     println!("INFO: {:?} ns, {:?} rps, {:?} requests", time_elapsed, rps, nrequests);
                     last_log = Instant::now();
                     self.nbytes = 0;
