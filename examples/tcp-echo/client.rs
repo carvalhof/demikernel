@@ -134,7 +134,7 @@ impl TcpEchoClient {
                     let time_elapsed: u64 = (Instant::now() - start).as_nanos() as u64;
                     let nrequests: u64 = (self.nbytes / self.bufsize) as u64;
                     let rps: u64 = nrequests / time_elapsed;
-                    println!("INFO: {:?} rps, {:?} requests", rps, nrequests);
+                    println!("INFO: {:?} ns, {:?} rps, {:?} requests", time_elapsed, rps, nrequests);
                     last_log = Instant::now();
                     self.nbytes = 0;
                 }
