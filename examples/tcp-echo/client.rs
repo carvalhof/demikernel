@@ -87,7 +87,7 @@ impl TcpEchoClient {
             qts: Vec::default(),
             qts_reverse: HashMap::default(),
             start: Instant::now(),
-            stats: Histogram::new(4, 20)?,
+            stats: Histogram::new(4, 64)?,
         });
     }
 
