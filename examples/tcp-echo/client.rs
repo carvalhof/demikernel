@@ -16,6 +16,7 @@ use demikernel::{
     QDesc,
     QToken,
 };
+use histogram::Histogram;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -62,6 +63,10 @@ pub struct TcpEchoClient {
     qts: Vec<QToken>,
     /// Reverse lookup table of pending operations.
     qts_reverse: HashMap<QToken, QDesc>,
+    /// Start time.
+    start: Instant,
+    /// Statistics.
+    stats: Histogram,
 }
 
 //======================================================================================================================
@@ -81,6 +86,8 @@ impl TcpEchoClient {
             clients: HashMap::default(),
             qts: Vec::default(),
             qts_reverse: HashMap::default(),
+            start: Instant::now(),
+            stats: Histogram::new(4, 20)?,
         });
     }
 
@@ -133,7 +140,14 @@ impl TcpEchoClient {
                     let time_elapsed: f64 = (Instant::now() - last_log).as_secs() as f64;
                     let nrequests: f64 = (self.nbytes / self.bufsize) as f64;
                     let rps: f64 = nrequests / time_elapsed;
-                    println!("INFO: {:?} s, {:2?} rps, {:?} requests", time_elapsed, rps, nrequests);
+                    println!(
+                        "INFO: {:?} s, {:2?} rps, {:?} requests, {:?} p50, {:?} p99",
+                        time_elapsed,
+                        rps,
+                        nrequests,
+                        self.stats.percentile(0.50)?.start(),
+                        self.stats.percentile(0.99)?.start()
+                    );
                     last_log = Instant::now();
                     self.nbytes = 0;
                 }
@@ -285,6 +299,18 @@ impl TcpEchoClient {
         Ok(sga)
     }
 
+    /// Creates a scatter-gather-array with a timestamp.
+    fn mksga_timestamp(&mut self, size: usize) -> Result<demi_sgarray_t> {
+        debug_assert!(size > std::mem::size_of::<u64>());
+        let sga: demi_sgarray_t = self.libos.sgaalloc(size)?;
+        let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
+        let len: usize = sga.sga_segs[0].sgaseg_len as usize;
+        let slice: &mut [u8] = unsafe { slice::from_raw_parts_mut(ptr, len) };
+        let now: u64 = Instant::now().duration_since(self.start).as_nanos() as u64;
+        slice.copy_from_slice(&now.to_le_bytes());
+        Ok(sga)
+    }
+
     /// Handles the completion of a pop operation.
     fn handle_pop(&mut self, qr: &demi_qresult_t) -> Result<()> {
         let qd: QDesc = qr.qr_qd.into();
@@ -307,20 +333,33 @@ impl TcpEchoClient {
 
             // TODO: Sanity check packet.
 
-            // Free scatter-gather-array.
-            self.libos.sgafree(sga)?;
-
-            *index += len;
-            self.nbytes += len;
-
             // Check if there are more bytes to read from this packet.
             if *index < recvbuf.capacity() {
+                // Free scatter-gather-array.
+                self.libos.sgafree(sga)?;
+
+                *index += len;
+                self.nbytes += len;
+
                 // There are, thus issue a partial pop.
                 let size: usize = recvbuf.capacity() - *index;
                 self.issue_pop(qd, Some(size))?;
             }
             // Push another packet.
             else {
+                // Read timestamp from recvbuf.
+                let timestamp: u64 = u64::from_le_bytes([
+                    recvbuf[0], recvbuf[1], recvbuf[2], recvbuf[3], recvbuf[4], recvbuf[5], recvbuf[6], recvbuf[7],
+                ]);
+                let now: u64 = Instant::now().duration_since(self.start).as_nanos() as u64;
+                let elapsed: u64 = now - timestamp;
+                self.stats.increment(elapsed)?;
+                // Free scatter-gather-array.
+                self.libos.sgafree(sga)?;
+
+                *index += len;
+                self.nbytes += len;
+
                 // There aren't, so push another packet.
                 *index = 0;
                 self.nechoed += 1;
@@ -382,8 +421,7 @@ impl TcpEchoClient {
 
     /// Issues a push operation
     fn issue_push(&mut self, qd: QDesc) -> Result<()> {
-        let fill_char: u8 = (self.npushed % (u8::MAX as usize - 1) + 1) as u8;
-        let sga: demi_sgarray_t = self.mksga(self.bufsize, fill_char)?;
+        let sga: demi_sgarray_t = self.mksga_timestamp(self.bufsize)?;
         let qt: QToken = self.libos.push(qd, &sga)?;
         self.register_operation(qd, qt);
         Ok(())
