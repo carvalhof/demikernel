@@ -141,10 +141,9 @@ impl TcpEchoClient {
                     let nrequests: f64 = (self.nbytes / self.bufsize) as f64;
                     let rps: f64 = nrequests / time_elapsed;
                     println!(
-                        "INFO: {:?} s, {:2?} rps, {:?} requests, {:?} p50, {:?} p99",
-                        time_elapsed,
-                        rps,
+                        "INFO: {:?} requests, {:2?} rps, p50 {:?} ns, p99 {:?} ns",
                         nrequests,
+                        rps,
                         self.stats.percentile(0.50)?.start(),
                         self.stats.percentile(0.99)?.start()
                     );
