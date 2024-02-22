@@ -331,14 +331,14 @@ impl TcpEchoClient {
             let slice: &mut [u8] = unsafe { slice::from_raw_parts_mut(ptr, len) };
             recvbuf[*index..(*index + len)].copy_from_slice(slice);
 
+            *index += len;
+
             // TODO: Sanity check packet.
 
             // Check if there are more bytes to read from this packet.
             if *index < recvbuf.capacity() {
                 // Free scatter-gather-array.
                 self.libos.sgafree(sga)?;
-
-                *index += len;
                 self.nbytes += len;
 
                 // There are, thus issue a partial pop.
@@ -354,10 +354,9 @@ impl TcpEchoClient {
                 let now: u64 = Instant::now().duration_since(self.start).as_nanos() as u64;
                 let elapsed: u64 = now - timestamp;
                 self.stats.increment(elapsed)?;
+
                 // Free scatter-gather-array.
                 self.libos.sgafree(sga)?;
-
-                *index += len;
                 self.nbytes += len;
 
                 // There aren't, so push another packet.
