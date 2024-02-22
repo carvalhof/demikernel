@@ -307,7 +307,7 @@ impl TcpEchoClient {
         let len: usize = sga.sga_segs[0].sgaseg_len as usize;
         let slice: &mut [u8] = unsafe { slice::from_raw_parts_mut(ptr, len) };
         let now: u64 = Instant::now().duration_since(self.start).as_nanos() as u64;
-        slice.copy_from_slice(&now.to_le_bytes());
+        slice[0..7].copy_from_slice(&now.to_le_bytes());
         Ok(sga)
     }
 
