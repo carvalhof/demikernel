@@ -184,7 +184,7 @@ impl SharedDemiRuntime {
         coroutine: Pin<Box<dyn FusedFuture<Output = R>>>,
     ) -> Result<QToken, Fail> {
         trace!("Inserting coroutine: {:?}", task_name);
-        let task: TaskWithResult<R> = TaskWithResult::<R>::new(task_name.to_string(), coroutine);
+        let task: TaskWithResult<R> = TaskWithResult::<R>::new(coroutine);
         match THREAD_SCHEDULER.with(|s| s.clone().insert_task(task)) {
             Some(task_id) => Ok(task_id.into()),
             None => {
@@ -222,7 +222,7 @@ impl SharedDemiRuntime {
         loop {
             if let Some(boxed_task) = THREAD_SCHEDULER.with(|s| s.clone().get_next_completed_task(TIMER_RESOLUTION)) {
                 // Perform bookkeeping for the completed and removed task.
-                trace!("Removing coroutine: {:?}", boxed_task.get_name());
+                trace!("Removing coroutine: {:?}", boxed_task.get_id());
                 let completed_qt: QToken = boxed_task.get_id().into();
                 // If an operation task (and not a background task), then check the task to see if it is one of ours.
                 if let Ok(operation_task) = OperationTask::try_from(boxed_task.as_any()) {
@@ -297,7 +297,7 @@ impl SharedDemiRuntime {
     pub fn run_any(&mut self, qts: &[QToken]) -> Option<(usize, QDesc, OperationResult)> {
         if let Some(boxed_task) = THREAD_SCHEDULER.with(|s| s.clone().get_next_completed_task(TIMER_RESOLUTION)) {
             // Perform bookkeeping for the completed and removed task.
-            trace!("Removing coroutine: {:?}", boxed_task.get_name());
+            trace!("Removing coroutine: {:?}", boxed_task.get_id());
             let qt: QToken = boxed_task.get_id().into();
 
             // If an operation task, then take a look at the result.
@@ -323,7 +323,7 @@ impl SharedDemiRuntime {
     pub fn poll(&mut self) {
         // For all ready tasks that were removed from the scheduler, add to our completed task list.
         for boxed_task in THREAD_SCHEDULER.with(|s| s.clone().poll_all()) {
-            trace!("Completed while polling coroutine: {:?}", boxed_task.get_name());
+            trace!("Completed while polling coroutine: {:?}", boxed_task.get_id());
             let qt: QToken = boxed_task.get_id().into();
 
             if let Ok(operation_task) = OperationTask::try_from(boxed_task.as_any()) {

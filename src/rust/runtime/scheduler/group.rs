@@ -74,12 +74,7 @@ impl TaskGroup {
         };
         waker_page_ref.clear(waker_page_offset);
         if let Some(task) = self.tasks.remove_unpin(pin_slab_index) {
-            trace!(
-                "remove(): name={:?}, id={:?}, pin_slab_index={:?}",
-                task.get_name(),
-                task_id,
-                pin_slab_index
-            );
+            trace!("remove(): id={:?}, pin_slab_index={:?}", task_id, pin_slab_index);
             Some(task)
         } else {
             warn!(
@@ -92,7 +87,6 @@ impl TaskGroup {
 
     /// Insert a new task into our scheduler returning a handle corresponding to it.
     pub fn insert(&mut self, task: Box<dyn Task>) -> Option<TaskId> {
-        let task_name: String = task.get_name();
         // The pin slab index can be reverse-computed in a page index and an offset within the page.
         let pin_slab_index: usize = self.tasks.insert(task)?;
         let task_id: TaskId = self.ids.insert_with_new_id(pin_slab_index.into());
@@ -106,12 +100,7 @@ impl TaskGroup {
         };
         waker_page_ref.initialize(waker_page_offset);
 
-        trace!(
-            "insert(): name={:?}, id={:?}, pin_slab_index={:?}",
-            task_name,
-            task_id,
-            pin_slab_index
-        );
+        trace!("insert(): id={:?}, pin_slab_index={:?}", task_id, pin_slab_index);
         // Set this task's id.
         expect_some!(self.tasks.get_pin_mut(pin_slab_index), "just allocated!").set_id(task_id);
         Some(task_id)
