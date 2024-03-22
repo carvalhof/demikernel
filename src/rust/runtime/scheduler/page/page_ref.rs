@@ -5,15 +5,12 @@
 // Imports
 //==============================================================================
 
-use crate::{
-    expect_ok,
-    runtime::scheduler::{
-        page::{
-            WakerPage,
-            WAKER_PAGE_SIZE,
-        },
-        waker64::WAKER_BIT_LENGTH,
+use crate::runtime::scheduler::{
+    page::{
+        WakerPage,
+        WAKER_PAGE_SIZE,
     },
+    waker64::WAKER_BIT_LENGTH,
 };
 use ::std::{
     alloc::{
@@ -126,7 +123,7 @@ impl Default for WakerPageRef {
     fn default() -> Self {
         let layout: Layout = Layout::new::<WakerPage>();
         assert_eq!(layout.align(), WAKER_PAGE_SIZE);
-        let mut ptr: NonNull<WakerPage> = expect_ok!(Global.allocate(layout), "Failed to allocate WakerPage").cast();
+        let mut ptr: NonNull<WakerPage> = Global.allocate(layout).expect("Failed to allocate WakerPage").cast();
         unsafe {
             let page: &mut WakerPage = ptr.as_mut();
             page.reset();

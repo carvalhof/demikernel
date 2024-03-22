@@ -17,6 +17,7 @@ use ::core::{
 };
 use ::std::alloc;
 
+#[cfg(feature = "profiler")]
 use crate::timer;
 
 //======================================================================================================================
@@ -41,6 +42,7 @@ pub struct RawArray<T> {
 impl<T> RawArray<T> {
     /// Creates a managed raw array.
     pub fn new(cap: usize) -> Result<RawArray<T>, Fail> {
+        #[cfg(feature = "profiler")]
         timer!("collections::raw_array::new");
         // Check if capacity is invalid.
         if cap == 0 {
@@ -69,6 +71,7 @@ impl<T> RawArray<T> {
 
     /// Constructs an unmanaged raw array from a pointer and a length.
     pub fn from_raw_parts(ptr: *mut T, len: usize) -> Result<RawArray<T>, Fail> {
+        #[cfg(feature = "profiler")]
         timer!("collections::raw_array::from_raw_parts");
         // Check if capacity is invalid.
         if len == 0 {
@@ -90,18 +93,21 @@ impl<T> RawArray<T> {
 
     /// Gets a mutable slice to the underlying data in the target raw array.
     pub unsafe fn get_mut(&self) -> &mut [T] {
+        #[cfg(feature = "profiler")]
         timer!("collections::raw_array::get_mut");
         slice::from_raw_parts_mut(self.ptr.as_ptr(), self.cap)
     }
 
     /// Gets a slice to the underlying data in the target raw array.
     pub unsafe fn get(&self) -> &[T] {
+        #[cfg(feature = "profiler")]
         timer!("collections::raw_array::get");
         slice::from_raw_parts(self.ptr.as_ptr(), self.cap)
     }
 
     /// Returns the capacity of the target raw array.
     pub fn capacity(&self) -> usize {
+        #[cfg(feature = "profiler")]
         timer!("collections::raw_array::capacity");
         self.cap
     }

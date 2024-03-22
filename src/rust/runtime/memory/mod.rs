@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-mod buffer_pool;
 mod demibuffer;
-mod memory_pool;
 
 //==============================================================================
 // Imports
@@ -24,15 +22,11 @@ use ::std::{
         NonNull,
     },
 };
-
 //==============================================================================
 // Exports
 //==============================================================================
 
-pub use self::{
-    buffer_pool::*,
-    demibuffer::*,
-};
+pub use self::demibuffer::*;
 
 //==============================================================================
 // Traits

@@ -6,41 +6,31 @@
 //==============================================================================
 
 use crate::{
-    demikernel::libos::network::queue::SharedNetworkQueue,
-    expect_ok,
-    expect_some,
-    pal::{
-        constants::SOMAXCONN,
-        data_structures::SockAddr,
-    },
-    runtime::{
-        fail::Fail,
-        limits,
-        memory::DemiBuffer,
-        network::{
+    collections::async_queue::SharedAsyncQueue, 
+    demikernel::libos::{
+        network::queue::SharedNetworkQueue, 
+        SharedDPDKRuntime, 
+        SharedInetStack
+    }, 
+    inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock,
+    pal::constants::SOMAXCONN, runtime::{
+        fail::Fail, limits, memory::{
+            DemiBuffer,
+            MemoryRuntime,
+        }, network::{
             socket::SocketId,
             transport::NetworkTransport,
             unwrap_socketaddr,
-        },
-        queue::{
+        }, queue::{
             downcast_queue,
             IoQueue,
             Operation,
             OperationResult,
-        },
-        types::{
-            demi_accept_result_t,
-            demi_opcode_t,
-            demi_qr_value_t,
+        }, scheduler::Yielder, types::{
             demi_qresult_t,
             demi_sgarray_t,
-        },
-        QDesc,
-        QToken,
-        SharedDemiRuntime,
-        SharedObject,
-    },
-    QType,
+        }, QDesc, QToken, SharedBetweenCores, SharedDemiRuntime, SharedObject
+    }, QType
 };
 use ::futures::FutureExt;
 use ::socket2::{
@@ -48,8 +38,8 @@ use ::socket2::{
     Protocol,
     Type,
 };
+use std::str::FromStr;
 use ::std::{
-    mem,
     net::{
         Ipv4Addr,
         SocketAddr,
@@ -60,14 +50,7 @@ use ::std::{
         DerefMut,
     },
     pin::Pin,
-    time::Duration,
 };
-
-#[cfg(target_os = "windows")]
-use crate::pal::functions::socketaddrv4_to_sockaddr;
-
-#[cfg(target_os = "linux")]
-use crate::pal::linux::socketaddrv4_to_sockaddr;
 
 //======================================================================================================================
 // Structures
@@ -78,10 +61,17 @@ use crate::pal::linux::socketaddrv4_to_sockaddr;
 /// Catnap libOS. All state is kept in the [runtime] and [qtable].
 /// TODO: Move [qtable] into [runtime] so all state is contained in the PosixRuntime.
 pub struct NetworkLibOS<T: NetworkTransport> {
+    id: usize,
     /// Underlying runtime.
     runtime: SharedDemiRuntime,
     /// Underlying network transport.
     transport: T,
+    /// Shared structure between cores.
+    shared_between_cores: *mut SharedBetweenCores,
+    ///
+    shared_queue: SharedAsyncQueue<QDesc>,
+    ///
+    ready_indices: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -94,11 +84,21 @@ pub struct SharedNetworkLibOS<T: NetworkTransport>(SharedObject<NetworkLibOS<T>>
 /// Associate Functions for Catnap LibOS
 impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// Instantiates a Catnap LibOS.
-    pub fn new(runtime: SharedDemiRuntime, transport: T) -> Self {
-        Self(SharedObject::new(NetworkLibOS::<T> {
+    pub fn new(id: usize, mut runtime: SharedDemiRuntime, transport: T, shared_between_cores: *mut SharedBetweenCores) -> Self {
+        let yielder: Yielder = Yielder::new();
+        let me: Self = Self(SharedObject::new(NetworkLibOS::<T> {
+            id,
             runtime: runtime.clone(),
             transport,
-        }))
+            shared_between_cores, 
+            shared_queue: SharedAsyncQueue::<QDesc>::default(),
+            ready_indices: Vec::<usize>::with_capacity(1_000_000_000),
+        }));
+        let _ = runtime.insert_background_coroutine(
+            "background for established connections",
+            Box::pin(me.clone().poll_for_established(yielder).fuse()));
+
+        me
     }
 
     /// Creates a socket. This function contains the libOS-level functionality needed to create a SharedNetworkQueue that
@@ -120,7 +120,8 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
 
         // Create underlying queue.
         let queue: SharedNetworkQueue<T> = SharedNetworkQueue::new(domain, typ, &mut self.transport)?;
-        let qd: QDesc = self.runtime.alloc_queue(queue);
+        let qd: QDesc = unsafe { (*self.shared_between_cores).alloc_queue(queue) };
+        // let qd: QDesc = self.runtime.alloc_queue(queue);
         Ok(qd)
     }
 
@@ -204,21 +205,52 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     pub fn accept(&mut self, qd: QDesc) -> Result<QToken, Fail> {
         trace!("accept(): qd={:?}", qd);
 
+        if self.id != 0 {
+            log::warn!("[w{:?}] This LibOS issues a fake accept coroutine", self.id);
+
+            let coroutine_constructor = || -> Result<QToken, Fail> {
+                let task_name: String = format!("[w{:?}] FakeAcceptCoroutine for qd={:?}", self.id, qd);
+                let coroutine_factory =
+                    |yielder| -> Pin<Box<Operation>> { Box::pin(self.clone().fake_accept_coroutine(self.shared_queue.clone(), yielder).fuse()) };
+
+                self.runtime
+                    .clone()
+                    .insert_coroutine_with_tracking(&task_name, coroutine_factory, qd)
+            };
+
+            return coroutine_constructor();
+        }
+
         let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
         let coroutine_constructor = || -> Result<QToken, Fail> {
-            let coroutine: Pin<Box<Operation>> = Box::pin(self.clone().accept_coroutine(qd).fuse());
+            let task_name: String = format!("[w{:?}] NetworkLibOS::accept for qd={:?}", self.id, qd);
+            let coroutine_factory =
+                |yielder| -> Pin<Box<Operation>> { Box::pin(self.clone().accept_coroutine(qd, yielder).fuse()) };
             self.runtime
                 .clone()
-                .insert_io_coroutine("NetworkLibOS::accept", coroutine)
+                .insert_coroutine_with_tracking(&task_name, coroutine_factory, qd)
         };
 
         queue.accept(coroutine_constructor)
     }
 
+    async fn fake_accept_coroutine(self, mut shared_queue: SharedAsyncQueue<QDesc>, yielder: Yielder) -> (QDesc, OperationResult) {
+        trace!("[w{:?}] fake_accept_coroutine()...", self.id);
+        match shared_queue.pop(&yielder).await {
+            Ok(qd) => {
+                trace!("[w{:?}] fake_accept_coroutine() completed", self.id);
+                (qd, OperationResult::Accept((qd, SocketAddrV4::from_str("1.1.1.1:1").unwrap())))
+            }
+            Err(e) => {
+                (self.get_qd(), OperationResult::Failed(e))
+            },
+        }
+    }
+
     /// Asynchronous cross-queue code for accepting a connection. This function returns a coroutine that runs
     /// asynchronously to accept a connection and performs any necessary multi-queue operations at the libOS-level after
     /// the accept succeeds or fails.
-    async fn accept_coroutine(mut self, qd: QDesc) -> (QDesc, OperationResult) {
+    async fn accept_coroutine(mut self, qd: QDesc, yielder: Yielder) -> (QDesc, OperationResult) {
         // Grab the queue, make sure it hasn't been closed in the meantime.
         // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
         // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
@@ -227,18 +259,28 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             Err(e) => return (qd, OperationResult::Failed(e)),
         };
         // Wait for the accept operation to complete.
-        match queue.accept_coroutine().await {
+        match queue.accept_coroutine(yielder).await {
             Ok(new_queue) => {
                 // TODO: Do we need to add this to the socket id to queue descriptor table?
                 // It is safe to call except here because the new queue is connected and it should be connected to a
                 // remote address.
-                let addr: SocketAddr =
-                    expect_some!(new_queue.remote(), "An accepted socket must have a remote address");
-                let new_qd: QDesc = self.runtime.alloc_queue(new_queue);
+                let addr: SocketAddr = new_queue
+                    .remote()
+                    .expect("An accepted socket must have a remote address");
+                let local: SocketAddrV4 = unwrap_socketaddr(new_queue.local().unwrap()).expect("we only support IPv4");
+                let remote: SocketAddrV4 = unwrap_socketaddr(new_queue.remote().unwrap()).expect("we only support IPv4");
+                // let new_qd: QDesc = self.runtime.alloc_queue(new_queue);
+                let new_qd: QDesc = unsafe { (*self.shared_between_cores).alloc_queue(new_queue) };
                 // FIXME: add IPv6 support; https://github.com/microsoft/demikernel/issues/935
+                unsafe {
+                    if let Some(sock) = (*self.shared_between_cores).get_mut_on_addresses(SocketId::Active(local, remote)) {
+                        let cb = (*sock).get_cb();
+                        (*self.shared_between_cores).add_background(new_qd, cb);
+                    }
+                }
                 (
                     qd,
-                    OperationResult::Accept((new_qd, expect_ok!(unwrap_socketaddr(addr), "we only support IPv4"))),
+                    OperationResult::Accept((new_qd, unwrap_socketaddr(addr).expect("we only support IPv4"))),
                 )
             },
             Err(e) => {
@@ -257,10 +299,13 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
         // FIXME: add IPv6 support; https://github.com/microsoft/demikernel/issues/935
         let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
         let coroutine_constructor = || -> Result<QToken, Fail> {
-            let coroutine: Pin<Box<Operation>> = Box::pin(self.clone().connect_coroutine(qd, remote).fuse());
+            let task_name: String = format!("NetworkLibOS::connect for qd={:?}", qd);
+            let coroutine_factory = |yielder| -> Pin<Box<Operation>> {
+                Box::pin(self.clone().connect_coroutine(qd, remote, yielder).fuse())
+            };
             self.runtime
                 .clone()
-                .insert_io_coroutine("NetworkLibOS::connect", coroutine)
+                .insert_coroutine_with_tracking(&task_name, coroutine_factory, qd)
         };
 
         queue.connect(coroutine_constructor)
@@ -269,7 +314,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// Asynchronous code to establish a connection to a remote endpoint. This function returns a coroutine that runs
     /// asynchronously to connect a queue and performs any necessary multi-queue operations at the libOS-level after
     /// the connect succeeds or fails.
-    async fn connect_coroutine(self, qd: QDesc, remote: SocketAddr) -> (QDesc, OperationResult) {
+    async fn connect_coroutine(mut self, qd: QDesc, remote: SocketAddr, yielder: Yielder) -> (QDesc, OperationResult) {
         // Grab the queue, make sure it hasn't been closed in the meantime.
         // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
         // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
@@ -278,7 +323,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             Err(e) => return (qd, OperationResult::Failed(e)),
         };
         // Wait for connect operation to complete.
-        match queue.connect_coroutine(remote).await {
+        match queue.connect_coroutine(remote, yielder).await {
             Ok(()) => {
                 // TODO: Do we need to add this to socket id to queue descriptor table?
                 (qd, OperationResult::Connect)
@@ -297,10 +342,12 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
 
         let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
         let coroutine_constructor = || -> Result<QToken, Fail> {
-            let coroutine: Pin<Box<Operation>> = Box::pin(self.clone().close_coroutine(qd).fuse());
+            let task_name: String = format!("NetworkLibOS::close for qd={:?}", qd);
+            let coroutine_factory =
+                |yielder| -> Pin<Box<Operation>> { Box::pin(self.clone().close_coroutine(qd, yielder).fuse()) };
             self.runtime
                 .clone()
-                .insert_io_coroutine("NetworkLibOS::close", coroutine)
+                .insert_coroutine_with_tracking(&task_name, coroutine_factory, qd)
         };
 
         queue.close(coroutine_constructor)
@@ -309,7 +356,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// Asynchronous code to close a queue. This function returns a coroutine that runs asynchronously to close a queue
     /// and the underlying POSIX socket and performs any necessary multi-queue operations at the libOS-level after
     /// the close succeeds or fails.
-    async fn close_coroutine(mut self, qd: QDesc) -> (QDesc, OperationResult) {
+    async fn close_coroutine(mut self, qd: QDesc, yielder: Yielder) -> (QDesc, OperationResult) {
         // Grab the queue, make sure it hasn't been closed in the meantime.
         // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
         // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
@@ -318,18 +365,19 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             Err(e) => return (qd, OperationResult::Failed(e)),
         };
         // Wait for close operation to complete.
-        match queue.close_coroutine().await {
+        match queue.close_coroutine(yielder).await {
             Ok(()) => {
                 // If the queue was bound, remove from the socket id to queue descriptor table.
                 if let Some(local) = queue.local() {
                     // FIXME: add IPv6 support; https://github.com/microsoft/demikernel/issues/935
-                    self.runtime.remove_socket_id_to_qd(&SocketId::Passive(expect_ok!(
-                        unwrap_socketaddr(local),
-                        "we only support IPv4"
-                    )));
+                    self.runtime.remove_socket_id_to_qd(&SocketId::Passive(
+                        unwrap_socketaddr(local).expect("we only support IPv4"),
+                    ));
 
                     // Check if this is an ephemeral port.
-                    if SharedDemiRuntime::is_private_ephemeral_port(local.port()) {
+                    if SharedDemiRuntime::is_private_ephemeral_port(local.port())
+                        && queue.get_qtype() == QType::UdpSocket
+                    {
                         // Allocate ephemeral port from the pool, to leave  ephemeral port allocator in a consistent state.
                         if let Err(e) = self.runtime.free_ephemeral_port(local.port()) {
                             let cause: String = format!("close(): Could not free ephemeral port");
@@ -340,10 +388,9 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
                 // Remove the queue from the queue table. Expect is safe here because we looked up the queue to
                 // schedule this coroutine and no other close coroutine should be able to run due to state machine
                 // checks.
-                expect_ok!(
-                    self.runtime.free_queue::<SharedNetworkQueue<T>>(&qd),
-                    "queue should exist"
-                );
+                self.runtime
+                    .free_queue::<SharedNetworkQueue<T>>(&qd)
+                    .expect("queue should exist");
                 (qd, OperationResult::Close)
             },
             Err(e) => {
@@ -357,43 +404,40 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// coroutine that asynchronously runs the push and any synchronous multi-queue functionality before the push
     /// begins.
     pub fn push(&mut self, qd: QDesc, sga: &demi_sgarray_t) -> Result<QToken, Fail> {
-        let buf: DemiBuffer = self.transport.clone_sgarray(sga)?;
+        // let buf: DemiBuffer = self.runtime.clone_sgarray(sga)?;
+        let token: std::ptr::NonNull<u8> = unsafe { std::ptr::NonNull::new_unchecked(sga.sga_buf as *mut u8) };
+        let buf: DemiBuffer = unsafe { DemiBuffer::from_raw(token) };
+
         if buf.len() == 0 {
             let cause: String = format!("zero-length buffer");
             warn!("push(): {}", cause);
             return Err(Fail::new(libc::EINVAL, &cause));
         };
 
-        let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
+        // let cb: *mut SharedControlBlock<SharedDPDKRuntime> = unsafe { *(*(*self.shared_between_cores).qd_to_cb).get_mut(&qd).unwrap() };
+        let cb: *mut SharedControlBlock<SharedDPDKRuntime> = unsafe { (*(*self.shared_between_cores).qd_to_cb).get_mut(qd).unwrap() };
+
         let coroutine_constructor = || -> Result<QToken, Fail> {
-            let coroutine: Pin<Box<Operation>> = Box::pin(self.clone().push_coroutine(qd, buf).fuse());
+            // let task_name: String = format!("NetworkLibOS::push for qd={:?}", qd);
+            let task_name = "NetworkLibOS::push for qd=";
+            let coroutine_factory =
+                |yielder| -> Pin<Box<Operation>> { Box::pin(self.clone().push_coroutine(qd, cb, buf, yielder).fuse()) };
             self.runtime
                 .clone()
-                .insert_io_coroutine("NetworkLibOS::push", coroutine)
+                .insert_coroutine_with_tracking(task_name, coroutine_factory, qd)
         };
+        // queue.push(coroutine_constructor)
 
-        queue.push(coroutine_constructor)
+        coroutine_constructor()
     }
 
     /// Asynchronous code to push [buf] to a SharedNetworkQueue and its underlying POSIX socket. This function returns a
     /// coroutine that runs asynchronously to push a queue and its underlying POSIX socket and performs any necessary
     /// multi-queue operations at the libOS-level after the push succeeds or fails.
-    async fn push_coroutine(self, qd: QDesc, mut buf: DemiBuffer) -> (QDesc, OperationResult) {
-        // Grab the queue, make sure it hasn't been closed in the meantime.
-        // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
-        // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
-        let mut queue: SharedNetworkQueue<T> = match self.get_shared_queue(&qd) {
-            Ok(queue) => queue,
-            Err(e) => return (qd, OperationResult::Failed(e)),
-        };
-        // Wait for push to complete.
-        match queue.push_coroutine(&mut buf, None).await {
-            Ok(()) => (qd, OperationResult::Push),
-            Err(e) => {
-                warn!("push() qd={:?}: {:?}", qd, &e);
-                (qd, OperationResult::Failed(e))
-            },
-        }
+    async fn push_coroutine(self, qd: QDesc, cb: *mut SharedControlBlock<SharedDPDKRuntime>, buf: DemiBuffer, _yielder: Yielder) -> (QDesc, OperationResult) {
+        let buf_ptr = buf.into_mbuf().unwrap();
+        unsafe { (*(*cb).aux_push_queue).enqueue(buf_ptr).unwrap() };
+        (qd, OperationResult::Push)
     }
 
     /// Synchronous code to pushto [buf] to [remote] on a SharedNetworkQueue and its underlying POSIX socket. This
@@ -402,17 +446,21 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     pub fn pushto(&mut self, qd: QDesc, sga: &demi_sgarray_t, remote: SocketAddr) -> Result<QToken, Fail> {
         trace!("pushto() qd={:?}", qd);
 
-        let buf: DemiBuffer = self.transport.clone_sgarray(sga)?;
+        let buf: DemiBuffer = self.runtime.clone_sgarray(sga)?;
         if buf.len() == 0 {
             return Err(Fail::new(libc::EINVAL, "zero-length buffer"));
         }
 
         let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
         let coroutine_constructor = || -> Result<QToken, Fail> {
-            let coroutine: Pin<Box<Operation>> = Box::pin(self.clone().pushto_coroutine(qd, buf, remote).fuse());
+            // let task_name: String = format!("NetworkLibOS::pushto for qd={:?}", qd);
+            let task_name = "NetworkLibOS::pushto for qd=";
+            let coroutine_factory = |yielder| -> Pin<Box<Operation>> {
+                Box::pin(self.clone().pushto_coroutine(qd, buf, remote, yielder).fuse())
+            };
             self.runtime
                 .clone()
-                .insert_io_coroutine("NetworkLibOS::pushto", coroutine)
+                .insert_coroutine_with_tracking(task_name, coroutine_factory, qd)
         };
 
         queue.push(coroutine_constructor)
@@ -421,7 +469,13 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// Asynchronous code to pushto [buf] to [remote] on a SharedNetworkQueue and its underlying POSIX socket. This function
     /// returns a coroutine that runs asynchronously to pushto a queue and its underlying POSIX socket and performs any
     /// necessary multi-queue operations at the libOS-level after the pushto succeeds or fails.
-    async fn pushto_coroutine(self, qd: QDesc, mut buf: DemiBuffer, remote: SocketAddr) -> (QDesc, OperationResult) {
+    async fn pushto_coroutine(
+        mut self,
+        qd: QDesc,
+        buf: DemiBuffer,
+        remote: SocketAddr,
+        yielder: Yielder,
+    ) -> (QDesc, OperationResult) {
         // Grab the queue, make sure it hasn't been closed in the meantime.
         // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
         // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
@@ -430,7 +484,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             Err(e) => return (qd, OperationResult::Failed(e)),
         };
         // Wait for push to complete.
-        match queue.push_coroutine(&mut buf, Some(remote)).await {
+        match queue.push_coroutine(buf, Some(remote), yielder).await {
             Ok(()) => (qd, OperationResult::Push),
             Err(e) => {
                 warn!("pushto() qd={:?}: {:?}", qd, &e);
@@ -443,163 +497,53 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// function schedules the asynchronous coroutine and performs any necessary synchronous, multi-queue operations
     /// at the libOS-level before beginning the pop.
     pub fn pop(&mut self, qd: QDesc, size: Option<usize>) -> Result<QToken, Fail> {
-        trace!("pop() qd={:?}, size={:?}", qd, size);
+        trace!("[w{:?}] pop() qd={:?}, size={:?}", self.id, qd, size);
 
         // We just assert 'size' here, because it was previously checked at PDPIX layer.
         debug_assert!(size.is_none() || ((size.unwrap() > 0) && (size.unwrap() <= limits::POP_SIZE_MAX)));
 
-        let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
+        // let cb: *mut SharedControlBlock<SharedDPDKRuntime> = unsafe { *(*(*self.shared_between_cores).qd_to_cb).get_mut(&qd).unwrap() };
+        let cb: *mut SharedControlBlock<SharedDPDKRuntime> = unsafe { (*(*self.shared_between_cores).qd_to_cb).get_mut(qd).unwrap() };
+        
         let coroutine_constructor = || -> Result<QToken, Fail> {
-            let coroutine: Pin<Box<Operation>> = Box::pin(self.clone().pop_coroutine(qd, size).fuse());
-            self.runtime.clone().insert_io_coroutine("NetworkLibOS::pop", coroutine)
+            // let task_name: String = format!("[w{:?}] NetworkLibOS::pop for qd={:?}", self.id, qd);
+            let task_name = "NetworkLibOS::pop for qd";
+            let coroutine_factory =
+                |yielder| -> Pin<Box<Operation>> { Box::pin(self.clone().pop_coroutine(qd, cb, size, yielder).fuse()) };
+            self.runtime
+                .clone()
+                .insert_coroutine_with_tracking(task_name, coroutine_factory, qd)
         };
+        // queue.pop(coroutine_constructor)
 
-        queue.pop(coroutine_constructor)
+        coroutine_constructor()
     }
 
     /// Asynchronous code to pop data from a SharedNetworkQueue and its underlying POSIX socket of optional [size]. This
     /// function returns a coroutine that asynchronously runs pop and performs any necessary multi-queue operations at
     /// the libOS-level after the pop succeeds or fails.
-    async fn pop_coroutine(self, qd: QDesc, size: Option<usize>) -> (QDesc, OperationResult) {
-        // Grab the queue, make sure it hasn't been closed in the meantime.
-        // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
-        // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
-        let mut queue: SharedNetworkQueue<T> = match self.get_shared_queue(&qd) {
-            Ok(queue) => queue,
-            Err(e) => return (qd, OperationResult::Failed(e)),
-        };
-
-        // Wait for pop to complete.
-        match queue.pop_coroutine(size).await {
-            // FIXME: add IPv6 support; https://github.com/microsoft/demikernel/issues/935
-            Ok((Some(addr), buf)) => (
-                qd,
-                OperationResult::Pop(Some(expect_ok!(unwrap_socketaddr(addr), "we only support IPv4")), buf),
-            ),
-            Ok((None, buf)) => (qd, OperationResult::Pop(None, buf)),
-            Err(e) => {
-                warn!("pop() qd={:?}: {:?}", qd, &e);
-                (qd, OperationResult::Failed(e))
-            },
-        }
-    }
-
-    /// Waits for a pending I/O operation to complete or a timeout to expire.
-    /// This is just a single-token convenience wrapper for wait_any().
-    pub fn wait(&mut self, qt: QToken, timeout: Duration) -> Result<demi_qresult_t, Fail> {
-        trace!("wait(): qt={:?}, timeout={:?}", qt, timeout);
-
-        // Put the QToken into a single element array.
-        let qt_array: [QToken; 1] = [qt];
-
-        // Call wait_any() to do the real work.
-        let (offset, qr): (usize, demi_qresult_t) = self.wait_any(&qt_array, timeout)?;
-        debug_assert_eq!(offset, 0);
-        Ok(qr)
-    }
-
-    /// Waits for any of the given pending I/O operations to complete or a timeout to expire.
-    pub fn wait_any(&mut self, qts: &[QToken], timeout: Duration) -> Result<(usize, demi_qresult_t), Fail> {
-        let (offset, qt, qd, result) = self.runtime.wait_any(qts, timeout)?;
-        Ok((offset, self.create_result(result, qd, qt)))
-    }
-
-    pub fn create_result(&self, result: OperationResult, qd: QDesc, qt: QToken) -> demi_qresult_t {
-        match result {
-            OperationResult::Connect => demi_qresult_t {
-                qr_opcode: demi_opcode_t::DEMI_OPC_CONNECT,
-                qr_qd: qd.into(),
-                qr_qt: qt.into(),
-                qr_ret: 0,
-                qr_value: unsafe { mem::zeroed() },
-            },
-            OperationResult::Accept((new_qd, addr)) => {
-                let saddr: SockAddr = socketaddrv4_to_sockaddr(&addr);
-                let qr_value: demi_qr_value_t = demi_qr_value_t {
-                    ares: demi_accept_result_t {
-                        qd: new_qd.into(),
-                        addr: saddr,
-                    },
-                };
-                demi_qresult_t {
-                    qr_opcode: demi_opcode_t::DEMI_OPC_ACCEPT,
-                    qr_qd: qd.into(),
-                    qr_qt: qt.into(),
-                    qr_ret: 0,
-                    qr_value,
+    async fn pop_coroutine(self, qd: QDesc, cb: *mut SharedControlBlock<SharedDPDKRuntime>, _size: Option<usize>, yielder: Yielder) -> (QDesc, OperationResult) {
+        loop {
+            if unsafe { (*(*cb).lock).trylock() } {
+                if let Some(buf) = unsafe { (*cb).try_pop() } {
+                    unsafe { (*(*cb).lock).unlock() }
+                    return (qd, OperationResult::Pop(None, buf));
                 }
-            },
-            OperationResult::Push => demi_qresult_t {
-                qr_opcode: demi_opcode_t::DEMI_OPC_PUSH,
-                qr_qd: qd.into(),
-                qr_qt: qt.into(),
-                qr_ret: 0,
-                qr_value: unsafe { mem::zeroed() },
-            },
-            OperationResult::Pop(addr, bytes) => match self.transport.into_sgarray(bytes) {
-                Ok(mut sga) => {
-                    if let Some(addr) = addr {
-                        sga.sga_addr = socketaddrv4_to_sockaddr(&addr);
-                    }
-                    let qr_value: demi_qr_value_t = demi_qr_value_t { sga };
-                    demi_qresult_t {
-                        qr_opcode: demi_opcode_t::DEMI_OPC_POP,
-                        qr_qd: qd.into(),
-                        qr_qt: qt.into(),
-                        qr_ret: 0,
-                        qr_value,
-                    }
-                },
-                Err(e) => {
-                    warn!("Operation Failed: {:?}", e);
-                    demi_qresult_t {
-                        qr_opcode: demi_opcode_t::DEMI_OPC_FAILED,
-                        qr_qd: qd.into(),
-                        qr_qt: qt.into(),
-                        qr_ret: e.errno as i64,
-                        qr_value: unsafe { mem::zeroed() },
-                    }
-                },
-            },
-            OperationResult::Close => demi_qresult_t {
-                qr_opcode: demi_opcode_t::DEMI_OPC_CLOSE,
-                qr_qd: qd.into(),
-                qr_qt: qt.into(),
-                qr_ret: 0,
-                qr_value: unsafe { mem::zeroed() },
-            },
-            OperationResult::Failed(e) => {
-                warn!("Operation Failed: {:?}", e);
-                demi_qresult_t {
-                    qr_opcode: demi_opcode_t::DEMI_OPC_FAILED,
-                    qr_qd: qd.into(),
-                    qr_qt: qt.into(),
-                    qr_ret: e.errno as i64,
-                    qr_value: unsafe { mem::zeroed() },
-                }
-            },
+                unsafe { (*(*cb).lock).unlock() }
+            }
+
+            match yielder.yield_once().await {
+                Ok(_) => continue,
+                Err(e) => panic!("Error: {:?}", e.cause)
+            }
         }
-    }
-
-    /// Allocates a scatter-gather array.
-    pub fn sgaalloc(&self, size: usize) -> Result<demi_sgarray_t, Fail> {
-        self.transport.sgaalloc(size)
-    }
-
-    /// Runs all runnable coroutines.
-    pub fn poll(&mut self) {
-        self.runtime.poll()
-    }
-
-    /// Releases a scatter-gather array.
-    pub fn sgafree(&self, sga: demi_sgarray_t) -> Result<(), Fail> {
-        self.transport.sgafree(sga)
     }
 
     /// This function gets a shared queue reference out of the I/O queue table. The type if a ref counted pointer to the
     /// queue itself.
-    fn get_shared_queue(&self, qd: &QDesc) -> Result<SharedNetworkQueue<T>, Fail> {
-        self.runtime.get_shared_queue::<SharedNetworkQueue<T>>(qd)
+    fn get_shared_queue(&mut self, qd: &QDesc) -> Result<SharedNetworkQueue<T>, Fail> {
+        // self.runtime.get_shared_queue::<SharedNetworkQueue<T>>(qd)
+        unsafe { (*self.shared_between_cores).get_shared_queue::<SharedNetworkQueue<T>>(qd) }
     }
 
     /// This exposes the transport for testing purposes.
@@ -611,6 +555,55 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     pub fn get_runtime(&self) -> SharedDemiRuntime {
         self.runtime.clone()
     }
+
+    #[allow(unused)]
+    pub fn set_qd(&mut self, qd: QDesc) {
+        unsafe { (*self.shared_between_cores).set_qd(qd) }
+    }
+
+    #[allow(unused)]
+    pub fn get_qd(&self) -> QDesc {
+        unsafe { (*self.shared_between_cores).get_qd() }
+    }
+
+    #[allow(unused)]
+    pub fn wait_for_something(&mut self, qts: &[QToken], output: &mut Vec<demi_qresult_t>) {
+        let mut a = self.ready_indices.clone();
+        while output.is_empty() {
+            a.clear();
+            self.runtime.poll(&mut a);
+
+            for qt in qts {
+                if let Ok(true) = self.runtime.has_completed(*qt) {
+                    if let Ok(qr) = self.runtime.remove_coroutine_and_get_result(*qt) {
+                        output.push(qr);
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(unused)]
+    pub async fn poll_for_established(mut self, yielder: Yielder) {
+        let id = self.id;
+        loop {
+            if let Ok((qd, cb)) = unsafe { (*(*self.shared_between_cores).conn_list)[id].pop(&yielder).await } {
+                let network = ((&self.transport as &dyn std::any::Any).downcast_ref::<SharedInetStack<SharedDPDKRuntime>>().unwrap().clone()).get_network();
+
+                let poll_yielder = Yielder::new();
+                let coroutine = unsafe { (*cb).poll(poll_yielder, network).fuse() };
+                let _ = self.runtime.insert_background_coroutine(
+                    // format!("[w{:?}] Inetstack::TCP::established::background for qd={:?}", id, qd).as_str(), 
+                    "Inetstack::TCP::established::background for qd=",
+                    Box::pin(coroutine)
+                );
+
+                log::warn!("[w{:?}] Waking up the FakeAcceptCoroutine", id);
+                self.shared_queue.push(qd);
+            }
+        }
+    }
+
 }
 
 //======================================================================================================================
@@ -646,5 +639,23 @@ impl<T: NetworkTransport> Deref for SharedNetworkLibOS<T> {
 impl<T: NetworkTransport> DerefMut for SharedNetworkLibOS<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
+    }
+}
+
+impl<T: NetworkTransport> MemoryRuntime for SharedNetworkLibOS<T> {
+    fn clone_sgarray(&self, sga: &demi_sgarray_t) -> Result<DemiBuffer, Fail> {
+        self.transport.clone_sgarray(sga)
+    }
+
+    fn into_sgarray(&self, buf: DemiBuffer) -> Result<demi_sgarray_t, Fail> {
+        self.transport.into_sgarray(buf)
+    }
+
+    fn sgaalloc(&self, size: usize) -> Result<demi_sgarray_t, Fail> {
+        self.transport.sgaalloc(size)
+    }
+
+    fn sgafree(&self, sga: demi_sgarray_t) -> Result<(), Fail> {
+        self.transport.sgafree(sga)
     }
 }

@@ -1,33 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use crate::expect_some;
-/// A Task is the abstraction that represents processes in Demikernel. Each Task runs a single async function, which
-/// represents a coroutine, until it completes. The Task then stores the result until get_result is called.
-///
-/// A Task goes through the following life cycle:
-///  Start execution
-///       |
-///       V
-///     Yield
-///       |
-///       V
-///  Resume execution
-///       |
-///       V
-///  Complete execution
-///       |
-///       V
-///   Get result
-///
-///  The Task can be in one of the following states:
-///  1. Running
-///  2. Yielded
-///  3. Completed
-///
-//======================================================================================================================
+//==============================================================================
 // Imports
-//======================================================================================================================
+//==============================================================================
+
 use ::futures::future::FusedFuture;
 use ::std::{
     any::Any,
@@ -38,10 +15,9 @@ use ::std::{
         Poll,
     },
 };
-
-//======================================================================================================================
+//==============================================================================
 // Structures
-//======================================================================================================================
+//==============================================================================
 
 /// Externally visible task identifier.
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
@@ -50,7 +26,6 @@ pub struct TaskId(pub u64);
 /// Task runs a single coroutine to completion and stores the result for later. Thus, it implements Future but
 /// never directly returns anything.
 pub trait Task: FusedFuture<Output = ()> + Unpin + Any {
-    fn get_name(&self) -> &'static str;
     fn as_any(self: Box<Self>) -> Box<dyn Any>;
     fn get_id(&self) -> TaskId;
     fn set_id(&mut self, id: TaskId);
@@ -58,15 +33,13 @@ pub trait Task: FusedFuture<Output = ()> + Unpin + Any {
 
 /// This trait is just for convenience of having defined associated types because we cannot define them on the struct
 /// impl as this feature is unstable in Rust.
-pub trait TaskWith: TryFrom<Box<dyn Any>> {
+pub trait TaskWith: From<Box<dyn Any>> {
     type Coroutine;
     type ResultType;
 }
 
 /// A specific instance of Task that returns a particular return type [R].
 pub struct TaskWithResult<R: Unpin + Clone + Any> {
-    /// Task name. The libOS should use this to identify the type of task.
-    name: &'static str,
     /// Task identifier.
     task_id: Option<TaskId>,
     /// Underlying coroutine to run.
@@ -75,16 +48,15 @@ pub struct TaskWithResult<R: Unpin + Clone + Any> {
     result: Option<<Self as TaskWith>::ResultType>,
 }
 
-//======================================================================================================================
-// Associated Functions
-//======================================================================================================================
+//==============================================================================
+// Associate Functions
+//==============================================================================
 
 /// Associate Functions for TaskWithResults.
 impl<R: Unpin + Clone + Any> TaskWithResult<R> {
     /// Instantiates a new Task.
-    pub fn new(name: &'static str, coroutine: Pin<<Self as TaskWith>::Coroutine>) -> Self {
+    pub fn new(coroutine: Pin<<Self as TaskWith>::Coroutine>) -> Self {
         Self {
-            name,
             task_id: None,
             coroutine,
             result: None,
@@ -97,9 +69,9 @@ impl<R: Unpin + Clone + Any> TaskWithResult<R> {
     }
 }
 
-//======================================================================================================================
+//==============================================================================
 // Trait Implementations
-//======================================================================================================================
+//==============================================================================
 
 impl From<u64> for TaskId {
     fn from(value: u64) -> Self {
@@ -119,29 +91,19 @@ impl<R: Unpin + Clone + Any> TaskWith for TaskWithResult<R> {
     type ResultType = R;
 }
 
-impl<R: Unpin + Clone + Any> TryFrom<Box<dyn Any>> for TaskWithResult<R> {
-    type Error = Box<dyn Any>;
-
-    fn try_from(value: Box<dyn Any>) -> Result<Self, Self::Error> {
-        match value.downcast::<Self>() {
-            Ok(ptr) => Ok(*ptr),
-            Err(e) => Err(e),
-        }
+impl<R: Unpin + Clone + Any> From<Box<dyn Any>> for TaskWithResult<R> {
+    fn from(task: Box<dyn Any>) -> Self {
+        *task.downcast::<Self>().expect("Wrong type!")
     }
 }
 
 impl<R: Unpin + Clone + Any> Task for TaskWithResult<R> {
-    // The coroutine type that this task will run.
-    fn get_name(&self) -> &'static str {
-        self.name
-    }
-
     fn as_any(self: Box<Self>) -> Box<dyn Any> {
         self
     }
 
     fn get_id(&self) -> TaskId {
-        expect_some!(self.task_id, "should have this set immediately")
+        self.task_id.expect("should have this set immediately")
     }
 
     fn set_id(&mut self, id: TaskId) {

@@ -25,9 +25,11 @@ use crate::{
             types::MacAddress,
             NetworkRuntime,
         },
+        scheduler::Yielder,
         QDesc,
         SharedDemiRuntime,
         SharedObject,
+        SharedBetweenCores,
     },
 };
 use ::futures::channel::mpsc;
@@ -65,6 +67,7 @@ pub struct TcpPeer<N: NetworkRuntime> {
     rng: SmallRng,
     dead_socket_tx: mpsc::UnboundedSender<QDesc>,
     addresses: HashMap<SocketId, SharedTcpSocket<N>>,
+    shared_between_cores: *mut SharedBetweenCores,
 }
 
 #[derive(Clone)]
@@ -83,6 +86,7 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
         tcp_config: TcpConfig,
         arp: SharedArpPeer<N>,
         rng_seed: [u8; 32],
+        shared_between_cores: *mut SharedBetweenCores,
     ) -> Result<Self, Fail> {
         let mut rng: SmallRng = SmallRng::from_seed(rng_seed);
         let nonce: u32 = rng.gen();
@@ -98,6 +102,7 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
             rng,
             dead_socket_tx: tx,
             addresses: HashMap::<SocketId, SharedTcpSocket<N>>::new(),
+            shared_between_cores,
         })))
     }
 
@@ -122,7 +127,11 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
 
         // Issue operation.
         socket.bind(local)?;
-        self.addresses.insert(SocketId::Passive(local), socket.clone());
+        // self.addresses.insert(SocketId::Passive(local), socket.clone());
+        unsafe {
+            // (*self.shared_between_cores).insert_on_addresses(SocketId::Passive(local), socket.clone());
+            (*self.shared_between_cores).insert_on_addresses(SocketId::Active(local, SocketAddrV4::new(Ipv4Addr::new(0, 0, 0,0), 0)), socket.clone());
+        }
         Ok(())
     }
 
@@ -135,13 +144,24 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
     }
 
     /// Runs until a new connection is accepted.
-    pub async fn accept(&self, socket: &mut SharedTcpSocket<N>) -> Result<SharedTcpSocket<N>, Fail> {
+    pub async fn accept(&mut self, socket: &mut SharedTcpSocket<N>, yielder: Yielder) -> Result<SharedTcpSocket<N>, Fail> {
         // Wait for accept to complete.
-        Ok(socket.accept().await?)
+        match socket.accept(yielder).await {
+            Ok(socket) => unsafe {
+                (*self.shared_between_cores).insert_on_addresses(SocketId::Active(socket.local().unwrap(), socket.remote().unwrap()), socket.clone());
+                Ok(socket)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Runs until the connect to remote is made or times out.
-    pub async fn connect(&mut self, socket: &mut SharedTcpSocket<N>, remote: SocketAddrV4) -> Result<(), Fail> {
+    pub async fn connect(
+        &mut self,
+        socket: &mut SharedTcpSocket<N>,
+        remote: SocketAddrV4,
+        yielder: Yielder,
+    ) -> Result<(), Fail> {
         // Check whether we need to allocate an ephemeral port.
         let local: SocketAddrV4 = match socket.local() {
             Some(addr) => addr,
@@ -166,7 +186,7 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
         }
         let local_isn: SeqNumber = self.isn_generator.generate(&local, &remote);
         // Wait for connect to complete.
-        if let Err(e) = socket.connect(local, remote, local_isn).await {
+        if let Err(e) = socket.connect(local, remote, local_isn, yielder).await {
             self.addresses.remove(&SocketId::Active(local, remote.clone()));
             Err(e)
         } else {
@@ -175,11 +195,14 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
     }
 
     /// Pushes immediately to the socket and returns the result asynchronously.
-    pub async fn push(&self, socket: &mut SharedTcpSocket<N>, buf: &mut DemiBuffer) -> Result<(), Fail> {
-        // TODO: Remove this copy after merging with the transport trait.
+    pub async fn push(
+        &self,
+        socket: &mut SharedTcpSocket<N>,
+        buf: DemiBuffer,
+        yielder: Yielder,
+    ) -> Result<(), Fail> {
         // Wait for push to complete.
-        socket.push(buf.clone()).await?;
-        buf.trim(buf.len())
+        socket.push(buf, yielder).await
     }
 
     /// Sets up a coroutine for popping data from the socket.
@@ -187,11 +210,12 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
         &self,
         socket: &mut SharedTcpSocket<N>,
         size: usize,
+        yielder: Yielder,
     ) -> Result<(Option<SocketAddr>, DemiBuffer), Fail> {
         // Grab the queue, make sure it hasn't been closed in the meantime.
         // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
         // structure and the SharedTcpQueue will not be freed until this coroutine finishes.
-        let incoming: DemiBuffer = socket.pop(Some(size)).await?;
+        let incoming: DemiBuffer = socket.pop(Some(size), yielder).await?;
         Ok((None, incoming))
     }
 
@@ -213,10 +237,10 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
     }
 
     /// Closes a TCP socket.
-    pub async fn close(&mut self, socket: &mut SharedTcpSocket<N>) -> Result<(), Fail> {
+    pub async fn close(&mut self, socket: &mut SharedTcpSocket<N>, yielder: Yielder) -> Result<(), Fail> {
         // Wait for close to complete.
         // Handle result: If unsuccessful, free the new queue descriptor.
-        if let Some(socket_id) = socket.close().await? {
+        if let Some(socket_id) = socket.close(yielder).await? {
             self.addresses.remove(&socket_id);
             self.free_ephemeral_port(&socket_id);
         }
@@ -253,20 +277,29 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
         }
 
         // Retrieve the queue descriptor based on the incoming segment.
-        let socket: &mut SharedTcpSocket<N> = match self.addresses.get_mut(&SocketId::Active(local, remote)) {
-            Some(socket) => socket,
-            None => match self.addresses.get_mut(&SocketId::Passive(local)) {
-                Some(socket) => socket,
-                None => {
-                    let cause: String = format!("no queue descriptor for remote address (remote={})", remote.ip());
-                    error!("receive(): {}", &cause);
-                    return;
+        let socket = unsafe {
+            match (*self.shared_between_cores).get_mut_on_addresses(SocketId::Active(local, remote)) {
+                Some(socket) => {
+                    log::warn!("Found on EstablishedSocket");
+                    socket
                 },
-            },
+                None => match (*self.shared_between_cores).get_mut_on_addresses(SocketId::Active(local, SocketAddrV4::new(Ipv4Addr::new(0, 0, 0,0), 0))) {
+                    Some(socket) => {
+                        log::warn!("Found on PassiveSocket");
+                        socket
+                    },
+                    None => {
+                        let cause: String = format!("no queue descriptor for remote address (remote={})", remote.ip());
+                        error!("receive(): {}", &cause);
+                        (*self.shared_between_cores).unlock();
+                        return;
+                    },
+                },
+            }
         };
 
         // Dispatch to further processing depending on the socket state.
-        socket.receive(ip_hdr, tcp_hdr, data)
+        unsafe { (*socket).receive(ip_hdr, tcp_hdr, data) }
     }
 }
 

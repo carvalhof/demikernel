@@ -16,7 +16,6 @@ use crate::{
         id_map::IdMap,
         pin_slab::PinSlab,
     },
-    expect_some,
     runtime::scheduler::{
         page::{
             WakerPageRef,
@@ -66,20 +65,23 @@ impl TaskGroup {
     /// Given a handle to a task, remove it from the scheduler
     pub fn remove(&mut self, task_id: TaskId) -> Option<Box<dyn Task>> {
         // We should not have a scheduler handle that refers to an invalid id, so unwrap and expect are safe here.
-        let pin_slab_index: usize =
-            expect_some!(self.ids.remove(&task_id), "Token should be in the token table").into();
+        let pin_slab_index: usize = self
+            .ids
+            .remove(&task_id)
+            .expect("Token should be in the token table")
+            .into();
         let (waker_page_ref, waker_page_offset): (&WakerPageRef, usize) = {
             let (waker_page_index, waker_page_offset) = self.get_waker_page_index_and_offset(pin_slab_index)?;
             (&self.waker_page_refs[waker_page_index], waker_page_offset)
         };
         waker_page_ref.clear(waker_page_offset);
         if let Some(task) = self.tasks.remove_unpin(pin_slab_index) {
-            trace!(
-                "remove(): name={:?}, id={:?}, pin_slab_index={:?}",
-                task.get_name(),
-                task_id,
-                pin_slab_index
-            );
+            // trace!(
+            //     "remove(): name={:?}, id={:?}, pin_slab_index={:?}",
+            //     task.get_name(),
+            //     task_id,
+            //     pin_slab_index
+            // );
             Some(task)
         } else {
             warn!(
@@ -92,7 +94,7 @@ impl TaskGroup {
 
     /// Insert a new task into our scheduler returning a handle corresponding to it.
     pub fn insert(&mut self, task: Box<dyn Task>) -> Option<TaskId> {
-        let task_name: &'static str = task.get_name();
+        // let task_name: String = task.get_name();
         // The pin slab index can be reverse-computed in a page index and an offset within the page.
         let pin_slab_index: usize = self.tasks.insert(task)?;
         let task_id: TaskId = self.ids.insert_with_new_id(pin_slab_index.into());
@@ -106,14 +108,17 @@ impl TaskGroup {
         };
         waker_page_ref.initialize(waker_page_offset);
 
-        trace!(
-            "insert(): name={:?}, id={:?}, pin_slab_index={:?}",
-            task_name,
-            task_id,
-            pin_slab_index
-        );
+        // trace!(
+        //     "insert(): name={:?}, id={:?}, pin_slab_index={:?}",
+        //     task_name,
+        //     task_id,
+        //     pin_slab_index
+        // );
         // Set this task's id.
-        expect_some!(self.tasks.get_pin_mut(pin_slab_index), "just allocated!").set_id(task_id);
+        self.tasks
+            .get_pin_mut(pin_slab_index)
+            .expect("just allocated!")
+            .set_id(task_id);
         Some(task_id)
     }
 
@@ -149,66 +154,69 @@ impl TaskGroup {
         (waker_page_index << WAKER_BIT_LENGTH_SHIFT) + waker_page_offset
     }
 
-    pub fn get_offsets_for_ready_tasks(&mut self) -> Vec<InternalId> {
-        let mut result: Vec<InternalId> = vec![];
-        for i in 0..self.get_num_waker_pages() {
+    pub fn has_completed(&self, task_id: TaskId) -> Option<bool> {
+        let pin_slab_index: usize = self.ids.get(&task_id)?.into();
+
+        let (waker_page_ref, waker_page_offset) = {
+            let (waker_page_index, waker_page_offset) = self.get_waker_page_index_and_offset(pin_slab_index)?;
+            (&self.waker_page_refs[waker_page_index], waker_page_offset)
+        };
+
+        Some(waker_page_ref.has_completed(waker_page_offset))
+    }
+
+    pub fn get_offsets_for_ready_tasks(&mut self, offsets: &mut Vec<usize>) {
+        for waker_page_index in 0..self.get_num_waker_pages() {
             // Grab notified bits.
-            let notified: u64 = self.waker_page_refs[i].take_notified();
-            // Turn into bit iter.
-            let mut offset: Vec<InternalId> = BitIter::from(notified)
-                .map(|x| Self::get_pin_slab_index(i, x).into())
-                .collect();
-            result.append(&mut offset);
+            let notified: u64 = self.waker_page_refs[waker_page_index].take_notified();
+            for waker_page_offset in BitIter::from(notified) {
+                let offset: usize = Self::get_pin_slab_index(waker_page_index, waker_page_offset);
+                offsets.push(offset);
+            }
         }
-        result
     }
 
-    /// Translates an internal task id to an external one. Expects the task to exist.
-    pub fn unchecked_internal_to_external_id(&self, internal_id: InternalId) -> TaskId {
-        expect_some!(self.tasks.get(internal_id.into()), "Invalid offset: {:?}", internal_id).get_id()
-    }
-
-    pub fn unchecked_external_to_internal_id(&self, task_id: &TaskId) -> InternalId {
-        expect_some!(self.ids.get(task_id), "Invalid id: {:?}", task_id)
+    pub fn get_id(&self, pin_slab_index: usize) -> TaskId {
+        // self.tasks
+        //     .get(pin_slab_index)
+        //     .expect(format!("Invalid offset: {:?}", pin_slab_index).as_str())
+        //     .get_id()
+        self.tasks.get(pin_slab_index).unwrap_or_else(|| panic!("Invalid offset: {:?}", pin_slab_index)).get_id()
     }
 
     fn get_pinned_task_ptr(&mut self, pin_slab_index: usize) -> Pin<&mut Box<dyn Task>> {
         // Get the pinned ref.
-        expect_some!(
-            self.tasks.get_pin_mut(pin_slab_index),
-            "Invalid offset: {:?}",
-            pin_slab_index
-        )
+        // self.tasks
+        //     .get_pin_mut(pin_slab_index)
+        //     .expect(format!("Invalid offset: {:?}", pin_slab_index).as_str())
+        self.tasks.get_pin_mut(pin_slab_index).unwrap_or_else(|| panic!("Invalid offset: {:?}", pin_slab_index))
     }
 
-    pub fn get_waker(&self, internal_task_id: InternalId) -> Option<Waker> {
-        let (waker_page_index, waker_page_offset) = self.get_waker_page_index_and_offset(internal_task_id.into())?;
-
+    fn get_waker(&self, waker_page_index: usize, waker_page_offset: usize) -> Waker {
         let raw_waker: NonNull<u8> = self.waker_page_refs[waker_page_index].into_raw_waker_ref(waker_page_offset);
-        Some(unsafe { Waker::from_raw(WakerRef::new(raw_waker).into()) })
+        unsafe { Waker::from_raw(WakerRef::new(raw_waker).into()) }
     }
 
-    pub fn poll_notified_task_and_remove_if_ready(&mut self, internal_task_id: InternalId) -> Option<Box<dyn Task>> {
-        // Perform the actual work of running the task.
-        let poll_result: Poll<()> = {
-            // Get the waker context.
-            let waker: Waker = self.get_waker(internal_task_id)?;
-            let mut waker_context: Context = Context::from_waker(&waker);
+    pub fn poll_notified_task(&mut self, pin_slab_index: usize) -> Option<bool> {
+        // Get the waker context.
+        let (waker_page_index, waker_page_offset) = self.get_waker_page_index_and_offset(pin_slab_index)?;
+        let waker: Waker = self.get_waker(waker_page_index, waker_page_offset);
+        let mut waker_context: Context = Context::from_waker(&waker);
 
-            let mut pinned_ptr = self.get_pinned_task_ptr(internal_task_id.into());
-            let pinned_ref = unsafe { Pin::new_unchecked(&mut *pinned_ptr) };
+        let mut pinned_ptr = self.get_pinned_task_ptr(pin_slab_index);
+        let pinned_ref = unsafe { Pin::new_unchecked(&mut *pinned_ptr) };
 
-            // Poll future.
-            Future::poll(pinned_ref, &mut waker_context)
-        };
-
+        // Poll future.
+        let poll_result: Poll<()> = Future::poll(pinned_ref, &mut waker_context);
         if let Poll::Ready(()) = poll_result {
-            let task_id: TaskId = self.unchecked_internal_to_external_id(internal_task_id);
-            return self.remove(task_id);
+            self.waker_page_refs[waker_page_index].mark_completed(waker_page_offset);
+            Some(true)
+        } else {
+            Some(false)
         }
-        None
     }
 
+    #[cfg(test)]
     pub fn is_valid_task(&self, task_id: &TaskId) -> bool {
         if let Some(internal_id) = self.ids.get(task_id) {
             self.tasks.contains(internal_id.into())

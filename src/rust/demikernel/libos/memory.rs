@@ -14,12 +14,17 @@ use crate::runtime::{
     QDesc,
     QToken,
 };
-use ::std::time::Duration;
+use ::std::time::{
+    Duration,
+    Instant,
+};
 
 #[cfg(feature = "catmem-libos")]
-use crate::catmem::SharedCatmemLibOS;
-#[cfg(feature = "catmem-libos")]
-use crate::runtime::memory::MemoryRuntime;
+use crate::{
+    catmem::SharedCatmemLibOS,
+    runtime::memory::MemoryRuntime,
+    runtime::SharedDemiRuntime,
+};
 
 //======================================================================================================================
 // Structures
@@ -28,7 +33,10 @@ use crate::runtime::memory::MemoryRuntime;
 /// Associated functions for Memory LibOSes.
 pub enum MemoryLibOS {
     #[cfg(feature = "catmem-libos")]
-    Catmem(SharedCatmemLibOS),
+    Catmem {
+        runtime: SharedDemiRuntime,
+        libos: SharedCatmemLibOS,
+    },
 }
 
 //======================================================================================================================
@@ -42,7 +50,7 @@ impl MemoryLibOS {
     pub fn create_pipe(&mut self, name: &str) -> Result<QDesc, Fail> {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.create_pipe(name),
+            MemoryLibOS::Catmem { runtime: _, libos } => libos.create_pipe(name),
             _ => unreachable!("unknown memory libos"),
         }
     }
@@ -52,7 +60,7 @@ impl MemoryLibOS {
     pub fn open_pipe(&mut self, name: &str) -> Result<QDesc, Fail> {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.open_pipe(name),
+            MemoryLibOS::Catmem { runtime: _, libos } => libos.open_pipe(name),
             _ => unreachable!("unknown memory libos"),
         }
     }
@@ -62,7 +70,7 @@ impl MemoryLibOS {
     pub fn async_close(&mut self, memqd: QDesc) -> Result<QToken, Fail> {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.async_close(memqd),
+            MemoryLibOS::Catmem { runtime: _, libos } => libos.async_close(memqd),
             _ => unreachable!("unknown memory libos"),
         }
     }
@@ -72,7 +80,7 @@ impl MemoryLibOS {
     pub fn push(&mut self, memqd: QDesc, sga: &demi_sgarray_t) -> Result<QToken, Fail> {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.push(memqd, sga),
+            MemoryLibOS::Catmem { runtime: _, libos } => libos.push(memqd, sga),
             _ => unreachable!("unknown memory libos"),
         }
     }
@@ -82,14 +90,14 @@ impl MemoryLibOS {
     pub fn pop(&mut self, memqd: QDesc, size: Option<usize>) -> Result<QToken, Fail> {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.pop(memqd, size),
+            MemoryLibOS::Catmem { runtime: _, libos } => libos.pop(memqd, size),
             _ => unreachable!("unknown memory libos"),
         }
     }
 
     /// Waits for a pending I/O operation to complete or a timeout to expire.
     /// This is just a single-token convenience wrapper for wait_any().
-    pub fn wait(&mut self, qt: QToken, timeout: Duration) -> Result<demi_qresult_t, Fail> {
+    pub fn wait(&mut self, qt: QToken, timeout: Option<Duration>) -> Result<demi_qresult_t, Fail> {
         trace!("wait(): qt={:?}, timeout={:?}", qt, timeout);
 
         // Put the QToken into a single element array.
@@ -101,15 +109,31 @@ impl MemoryLibOS {
         Ok(qr)
     }
 
-    #[allow(unreachable_patterns, unused_variables)]
     /// Waits for any of the given pending I/O operations to complete or a timeout to expire.
-    #[allow(unreachable_patterns, unused_variables)]
-    pub fn wait_any(&mut self, qts: &[QToken], timeout: Duration) -> Result<(usize, demi_qresult_t), Fail> {
+    pub fn wait_any(&mut self, qts: &[QToken], timeout: Option<Duration>) -> Result<(usize, demi_qresult_t), Fail> {
         trace!("wait_any(): qts={:?}, timeout={:?}", qts, timeout);
-        match self {
-            #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.wait_any(qts, timeout),
-            _ => unreachable!("unknown memory libos"),
+
+        // Get the wait start time, but only if we have a timeout.  We don't care when we started if we wait forever.
+        let start: Option<Instant> = if timeout.is_none() { None } else { Some(Instant::now()) };
+
+        loop {
+            // Poll first, so as to give pending operations a chance to complete.
+            self.poll();
+
+            // Search for any operation that has completed.
+            for (i, &qt) in qts.iter().enumerate() {
+                if self.has_completed(qt)? {
+                    return Ok((i, self.get_result(qt)?));
+                }
+            }
+
+            // If we have a timeout, check for expiration.
+            if timeout.is_some()
+                && Instant::now().duration_since(start.expect("start should be set if timeout is"))
+                    > timeout.expect("timeout should still be set")
+            {
+                return Err(Fail::new(libc::ETIMEDOUT, "timer expired"));
+            }
         }
     }
 
@@ -118,7 +142,7 @@ impl MemoryLibOS {
     pub fn sgaalloc(&self, size: usize) -> Result<demi_sgarray_t, Fail> {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.sgaalloc(size),
+            MemoryLibOS::Catmem { runtime, libos: _ } => runtime.sgaalloc(size),
             _ => unreachable!("unknown memory libos"),
         }
     }
@@ -128,7 +152,16 @@ impl MemoryLibOS {
     pub fn sgafree(&self, sga: demi_sgarray_t) -> Result<(), Fail> {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.sgafree(sga),
+            MemoryLibOS::Catmem { runtime, libos: _ } => runtime.sgafree(sga),
+            _ => unreachable!("unknown memory libos"),
+        }
+    }
+
+    #[allow(unreachable_patterns, unused_variables)]
+    pub fn get_result(&mut self, qt: QToken) -> Result<demi_qresult_t, Fail> {
+        match self {
+            #[cfg(feature = "catmem-libos")]
+            MemoryLibOS::Catmem { runtime, libos } => runtime.remove_coroutine_and_get_result(qt),
             _ => unreachable!("unknown memory libos"),
         }
     }
@@ -138,7 +171,16 @@ impl MemoryLibOS {
     pub fn poll(&mut self) {
         match self {
             #[cfg(feature = "catmem-libos")]
-            MemoryLibOS::Catmem(libos) => libos.poll(),
+            MemoryLibOS::Catmem { runtime, libos: _ } => runtime.poll(),
+            _ => unreachable!("unknown memory libos"),
+        }
+    }
+
+    #[allow(unreachable_patterns, unused_variables)]
+    pub fn has_completed(&self, qt: QToken) -> Result<bool, Fail> {
+        match self {
+            #[cfg(feature = "catmem-libos")]
+            MemoryLibOS::Catmem { runtime, libos: _ } => runtime.has_completed(qt),
             _ => unreachable!("unknown memory libos"),
         }
     }

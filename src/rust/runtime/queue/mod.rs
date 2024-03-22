@@ -261,7 +261,6 @@ mod tests {
         IoQueueTable,
     };
     use crate::{
-        expect_ok,
         QDesc,
         QType,
     };
@@ -297,7 +296,7 @@ mod tests {
         b.iter(|| {
             let qd: QDesc = ioqueue_table.alloc::<TestQueue>(TestQueue {});
             black_box(qd);
-            let queue: TestQueue = expect_ok!(ioqueue_table.free::<TestQueue>(&qd), "must be TestQueue");
+            let queue: TestQueue = ioqueue_table.free::<TestQueue>(&qd).expect("must be TestQueue");
             black_box(queue);
         });
     }

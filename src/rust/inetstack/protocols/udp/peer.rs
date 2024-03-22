@@ -21,6 +21,7 @@ use crate::{
             types::MacAddress,
             NetworkRuntime,
         },
+        scheduler::Yielder,
         SharedDemiRuntime,
         SharedObject,
     },
@@ -38,6 +39,7 @@ use ::std::{
     },
 };
 
+#[cfg(feature = "profiler")]
 use crate::timer;
 
 //======================================================================================================================
@@ -122,7 +124,7 @@ impl<N: NetworkRuntime> SharedUdpPeer<N> {
     }
 
     /// Closes a UDP socket asynchronously.
-    pub async fn close(&mut self, socket: &mut SharedUdpSocket<N>) -> Result<(), Fail> {
+    pub async fn close(&mut self, socket: &mut SharedUdpSocket<N>, _yielder: Yielder) -> Result<(), Fail> {
         self.hard_close(socket)
     }
 
@@ -132,6 +134,7 @@ impl<N: NetworkRuntime> SharedUdpPeer<N> {
         socket: &mut SharedUdpSocket<N>,
         buf: &mut DemiBuffer,
         remote: Option<SocketAddr>,
+        yielder: Yielder,
     ) -> Result<(), Fail> {
         // TODO: Allocate ephemeral port if not bound.
         // FIXME: https://github.com/microsoft/demikernel/issues/973
@@ -141,7 +144,7 @@ impl<N: NetworkRuntime> SharedUdpPeer<N> {
             return Err(Fail::new(libc::ENOTSUP, &cause));
         }
         // TODO: Remove copy once we actually use push coroutine for send.
-        socket.push(remote, buf.clone()).await?;
+        socket.push(remote, buf.clone(), yielder).await?;
         buf.trim(buf.len())
     }
 
@@ -149,14 +152,21 @@ impl<N: NetworkRuntime> SharedUdpPeer<N> {
     pub async fn pop(
         &mut self,
         socket: &mut SharedUdpSocket<N>,
+        buf: &mut DemiBuffer,
         size: usize,
-    ) -> Result<(Option<SocketAddr>, DemiBuffer), Fail> {
-        let (addr, buf) = socket.pop(size).await?;
-        Ok((Some(addr.into()), buf))
+        yielder: Yielder,
+    ) -> Result<Option<SocketAddr>, Fail> {
+        let (addr, incoming): (SocketAddrV4, DemiBuffer) = socket.pop(size, yielder).await?;
+        // TODO: Remove copy.
+        let len: usize = incoming.len();
+        buf.trim(size - len)?;
+        buf.copy_from_slice(&incoming[0..len]);
+        Ok(Some(addr.into()))
     }
 
     /// Consumes the payload from a buffer.
     pub fn receive(&mut self, ipv4_hdr: Ipv4Header, buf: DemiBuffer) {
+        #[cfg(feature = "profiler")]
         timer!("udp::receive");
         // Parse datagram.
         let (hdr, data): (UdpHeader, DemiBuffer) = match UdpHeader::parse(&ipv4_hdr, buf, self.checksum_offload) {

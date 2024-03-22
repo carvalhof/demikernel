@@ -28,6 +28,7 @@ use crate::{
             unwrap_socketaddr,
             NetworkRuntime,
         },
+        scheduler::Yielder,
         SharedObject,
     },
 };
@@ -104,7 +105,7 @@ impl<N: NetworkRuntime> SharedUdpSocket<N> {
         Ok(())
     }
 
-    pub async fn push(&mut self, remote: Option<SocketAddr>, buf: DemiBuffer) -> Result<(), Fail> {
+    pub async fn push(&mut self, remote: Option<SocketAddr>, buf: DemiBuffer, yielder: Yielder) -> Result<(), Fail> {
         let remote: SocketAddrV4 = if let Some(remote) = remote {
             unwrap_socketaddr(remote)?
         } else {
@@ -120,7 +121,7 @@ impl<N: NetworkRuntime> SharedUdpSocket<N> {
             error!("pushto(): {}", &cause);
             return Err(Fail::new(libc::ENOTSUP, &cause));
         };
-        let remote_link_addr: MacAddress = self.arp.query(remote.ip().clone()).await?;
+        let remote_link_addr: MacAddress = self.arp.query(remote.ip().clone(), &yielder).await?;
         let udp_header: UdpHeader = UdpHeader::new(port, remote.port());
         debug!("UDP send {:?}", udp_header);
         let datagram = UdpDatagram::new(
@@ -134,9 +135,9 @@ impl<N: NetworkRuntime> SharedUdpSocket<N> {
         Ok(())
     }
 
-    pub async fn pop(&mut self, size: usize) -> Result<(SocketAddrV4, DemiBuffer), Fail> {
+    pub async fn pop(&mut self, size: usize, yielder: Yielder) -> Result<(SocketAddrV4, DemiBuffer), Fail> {
         loop {
-            match self.recv_queue.pop(None).await {
+            match self.recv_queue.pop(&yielder).await {
                 Ok(msg) => {
                     let remote: SocketAddrV4 = msg.0;
                     let mut buf: DemiBuffer = msg.1;

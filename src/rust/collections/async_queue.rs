@@ -6,9 +6,11 @@
 //======================================================================================================================
 
 use crate::runtime::{
-    conditional_yield_with_timeout,
     fail::Fail,
-    SharedConditionVariable,
+    scheduler::{
+        Yielder,
+        YielderHandle,
+    },
     SharedObject,
 };
 use ::std::{
@@ -23,15 +25,8 @@ use ::std::{
         Deref,
         DerefMut,
     },
-    time::Duration,
+    vec::Vec,
 };
-
-//======================================================================================================================
-// Constants
-//======================================================================================================================
-
-// The following value was chosen arbitrarily.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 //======================================================================================================================
 // Structures
@@ -41,7 +36,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// pop, if the queue is empty, the coroutine will yield until there is data to be read.
 pub struct AsyncQueue<T> {
     queue: VecDeque<T>,
-    cond_var: SharedConditionVariable,
+    waiters: Vec<YielderHandle>,
 }
 
 pub struct SharedAsyncQueue<T>(SharedObject<AsyncQueue<T>>);
@@ -56,7 +51,7 @@ impl<T> AsyncQueue<T> {
     pub fn with_capacity(size: usize) -> Self {
         Self {
             queue: VecDeque::<T>::with_capacity(size),
-            cond_var: SharedConditionVariable::default(),
+            waiters: Vec::<YielderHandle>::new(),
         }
     }
 
@@ -64,26 +59,38 @@ impl<T> AsyncQueue<T> {
     /// add bounds checking in the future.
     pub fn push(&mut self, item: T) {
         self.queue.push_back(item);
-        self.cond_var.signal();
+        if let Some(mut yielder_handle) = self.waiters.pop() {
+            yielder_handle.wake_with(Ok(()));
+        }
     }
 
     pub fn push_front(&mut self, item: T) {
         self.queue.push_front(item);
-        self.cond_var.signal();
+        if let Some(mut yielder_handle) = self.waiters.pop() {
+            yielder_handle.wake_with(Ok(()));
+        }
     }
 
     /// Pop from an async queue. If the queue is empty, this function blocks until it finds something in the queue.
-    pub async fn pop(&mut self, timeout: Option<Duration>) -> Result<T, Fail> {
-        let wait_condition = async {
-            loop {
-                if let Some(item) = self.queue.pop_front() {
-                    return item;
-                } else {
-                    self.cond_var.wait().await;
+    pub async fn pop(&mut self, yielder: &Yielder) -> Result<T, Fail> {
+        match self.queue.pop_front() {
+            Some(item) => Ok(item),
+            None => {
+                let yielder_handle: YielderHandle = yielder.get_handle();
+                self.waiters.push(yielder_handle);
+                match yielder.yield_until_wake().await {
+                    Ok(()) => match self.queue.pop_front() {
+                        Some(item) => Ok(item),
+                        None => {
+                            let cause: &str = "Spurious wake up!";
+                            warn!("pop(): {}", cause);
+                            Err(Fail::new(libc::EAGAIN, cause))
+                        },
+                    },
+                    Err(e) => Err(e),
                 }
-            }
-        };
-        conditional_yield_with_timeout(wait_condition, timeout.unwrap_or(DEFAULT_TIMEOUT)).await
+            },
+        }
     }
 
     /// Try to get the head of the queue.
@@ -130,8 +137,10 @@ impl<T> SharedAsyncQueue<T> {
 impl<T> Default for AsyncQueue<T> {
     fn default() -> Self {
         Self {
-            queue: VecDeque::<T>::default(),
-            cond_var: SharedConditionVariable::default(),
+            // queue: VecDeque::<T>::new(),
+            queue: VecDeque::<T>::with_capacity(100000000),
+            // waiters: Vec::<YielderHandle>::new(),
+            waiters: Vec::<YielderHandle>::with_capacity(100000000),
         }
     }
 }

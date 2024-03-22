@@ -76,7 +76,6 @@ impl Waker64 {
         Some(old)
     }
 
-    #[allow(unused)]
     /// Returns the value stored in the the target [Waker64].
     pub fn load(&self) -> u64 {
         let s = unsafe { &mut *self.0.get() };
@@ -104,7 +103,6 @@ unsafe impl Sync for Waker64 {}
 #[cfg(test)]
 mod tests {
     use super::Waker64;
-    use crate::expect_some;
     use ::rand::Rng;
     use ::test::{
         black_box,
@@ -151,7 +149,7 @@ mod tests {
         b.iter(|| {
             let val: u64 = black_box(x);
             let w64: Waker64 = Waker64::new(64);
-            expect_some!(w64.fetch_sub(val), "fetch_sub() overflowed");
+            w64.fetch_sub(val).expect("fetch_sub() overflowed");
         });
     }
 

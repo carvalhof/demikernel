@@ -14,7 +14,6 @@ use self::rawsocket::{
 };
 use crate::{
     demikernel::config::Config,
-    expect_ok,
     runtime::{
         memory::MemoryRuntime,
         network::{
@@ -70,13 +69,10 @@ impl LinuxRuntime {
 
         // TODO: Make this constructor return a Result and drop expect() calls below.
         let mac_addr: [u8; 6] = [0; 6];
-        let ifindex: i32 = expect_ok!(
-            Self::get_ifindex(&config.local_interface_name()),
-            "could not parse ifindex"
-        );
-        let socket: RawSocket = expect_ok!(RawSocket::new(), "could not create raw socket");
+        let ifindex: i32 = Self::get_ifindex(&config.local_interface_name()).expect("could not parse ifindex");
+        let socket: RawSocket = RawSocket::new().expect("could not create raw socket");
         let sockaddr: RawSocketAddr = RawSocketAddr::new(ifindex, &mac_addr);
-        expect_ok!(socket.bind(&sockaddr), "could not bind raw socket");
+        socket.bind(&sockaddr).expect("could not bind raw socket");
 
         Self {
             tcp_config: TcpConfig::default(),
@@ -92,9 +88,7 @@ impl LinuxRuntime {
     /// Gets the interface index of the network interface named `ifname`.
     fn get_ifindex(ifname: &str) -> Result<i32, ParseIntError> {
         let path: String = format!("/sys/class/net/{}/ifindex", ifname);
-        expect_ok!(fs::read_to_string(path), "could not read ifname")
-            .trim()
-            .parse()
+        fs::read_to_string(path).expect("could not read ifname").trim().parse()
     }
 
     pub fn get_link_addr(&self) -> MacAddress {

@@ -5,22 +5,11 @@
 // Imports
 //======================================================================================================================
 
-use crate::{
-    collections::async_value::SharedAsyncValue,
-    runtime::{
-        fail::Fail,
-        network::socket::operation::SocketOp,
-    },
+use crate::runtime::{
+    fail::Fail,
+    network::socket::operation::SocketOp,
 };
 use ::socket2::Type;
-use ::std::time::Duration;
-
-//======================================================================================================================
-// Structures
-//======================================================================================================================
-
-/// Set the timeout to be large enough that we effectively never time out.
-const TIMEOUT: Duration = Duration::from_secs(1000);
 
 //======================================================================================================================
 // Structures
@@ -46,10 +35,10 @@ enum SocketState {
 }
 
 /// Encodes the state of a socket.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SocketStateMachine {
     typ: Type,
-    current: SharedAsyncValue<SocketState>,
+    current: SocketState,
     next: Option<SocketState>,
 }
 
@@ -64,7 +53,7 @@ impl SocketStateMachine {
         debug_assert!(typ == Type::STREAM || typ == Type::DGRAM);
         Self {
             typ,
-            current: SharedAsyncValue::new(SocketState::Unbound),
+            current: SocketState::Unbound,
             next: None,
         }
     }
@@ -73,7 +62,7 @@ impl SocketStateMachine {
     pub fn new_established() -> Self {
         Self {
             typ: Type::STREAM,
-            current: SharedAsyncValue::new(SocketState::ActiveEstablished),
+            current: SocketState::ActiveEstablished,
             next: None,
         }
     }
@@ -86,39 +75,11 @@ impl SocketStateMachine {
         Ok(())
     }
 
-    // Blocks until the socket is no longer in a state where it may accept.
-    pub async fn while_may_accept(&mut self) -> Fail {
-        loop {
-            match self.may_accept() {
-                Ok(()) => {
-                    // If either a time out or the current state changed, check it again.
-                    _ = self.current.clone().wait_for_change(Some(TIMEOUT)).await;
-                    continue;
-                },
-                Err(e) => return e,
-            }
-        }
-    }
-
     /// Asserts whether the target may continue connecting to a remote.
     pub fn may_connect(&self) -> Result<(), Fail> {
         self.ensure_not_closing()?;
         self.ensure_not_closed()?;
         Ok(())
-    }
-
-    // Blocks until the socket is no longer in a state where it may connect.
-    pub async fn while_may_connect(&mut self) -> Fail {
-        loop {
-            match self.may_connect() {
-                Ok(()) => {
-                    // If either a time out or the current state changed, check it again.
-                    _ = self.current.clone().wait_for_change(Some(TIMEOUT)).await;
-                    continue;
-                },
-                Err(e) => return e,
-            }
-        }
     }
 
     /// Asserts whether the target [SocketState] may push data.
@@ -133,20 +94,6 @@ impl SocketStateMachine {
         // NOTE: no need to ensure other states, because this is checked on the prepare operation.
 
         Ok(())
-    }
-
-    // Blocks until the socket is no longer in a state where it may connect.
-    pub async fn while_may_push(&mut self) -> Fail {
-        loop {
-            match self.may_push() {
-                Ok(()) => {
-                    // If either a time out or the current state changed, check it again.
-                    _ = self.current.clone().wait_for_change(Some(TIMEOUT)).await;
-                    continue;
-                },
-                Err(e) => return e,
-            }
-        }
     }
 
     /// Asserts whether the target [SocketState] may pop data.
@@ -165,24 +112,9 @@ impl SocketStateMachine {
         Ok(())
     }
 
-    // Blocks until the socket is no longer in a state where it may connect.
-    pub async fn while_may_pop(&mut self) -> Fail {
-        loop {
-            match self.may_pop() {
-                Ok(()) => {
-                    // If either a time out or the current state changed, check it again.
-                    _ = self.current.clone().wait_for_change(Some(TIMEOUT)).await;
-                    continue;
-                },
-                Err(e) => return e,
-            }
-        }
-    }
-
     /// Commits to moving into the prepared state
     pub fn commit(&mut self) {
-        let current: SocketState = self.current.get();
-        self.current.set(self.next.unwrap_or(current));
+        self.current = self.next.unwrap_or(self.current);
         self.next = None;
     }
 
@@ -208,7 +140,7 @@ impl SocketStateMachine {
 
     /// Given the current state and the operation being executed, this function returns the next state on success and
     fn get_next_state(&self, op: SocketOp) -> Result<SocketState, Fail> {
-        let next_state: Result<SocketState, Fail> = match self.current.get() {
+        let next_state: Result<SocketState, Fail> = match self.current {
             SocketState::Unbound => self.unbound_state(op),
             SocketState::Bound => self.bound_state(op),
             SocketState::PassiveListening => self.listening_state(op),
@@ -219,7 +151,7 @@ impl SocketStateMachine {
         };
         match next_state {
             Ok(state) => {
-                if state != self.current.get() && self.next != Some(state) {
+                if state != self.current && self.next != Some(state) {
                     debug!("get_next_state(): current={:?}, transition={:?}", self.current, op);
                 }
                 Ok(state)
@@ -322,7 +254,7 @@ impl SocketStateMachine {
 
     /// Ensures that the target [SocketState] is bound.
     fn ensure_bound(&self) -> Result<(), Fail> {
-        if self.current.get() != SocketState::Bound {
+        if self.current != SocketState::Bound {
             let cause: String = format!("socket is not bound");
             error!("ensure_bound(): {}", cause);
             return Err(Fail::new(libc::EDESTADDRREQ, &cause));
@@ -332,7 +264,7 @@ impl SocketStateMachine {
 
     /// Ensures that the target [SocketState] is accepting incoming connections.
     fn ensure_listening(&self) -> Result<(), Fail> {
-        if self.current.get() != SocketState::PassiveListening {
+        if self.current != SocketState::PassiveListening {
             let cause: String = format!("socket is not listening");
             error!("ensure_listening(): {}", cause);
             return Err(Fail::new(libc::EINVAL, &cause));
@@ -342,7 +274,7 @@ impl SocketStateMachine {
 
     /// Ensures that the target [SocketState] is connected.
     fn ensure_established(&self) -> Result<(), Fail> {
-        if self.current.get() != SocketState::ActiveEstablished {
+        if self.current != SocketState::ActiveEstablished {
             let cause: String = format!("socket is not connected");
             error!("ensure_connected(): {}", cause);
             return Err(Fail::new(libc::ENOTCONN, &cause));
@@ -352,7 +284,7 @@ impl SocketStateMachine {
 
     /// Ensures that the target [SocketState] is not closing.
     fn ensure_not_closing(&self) -> Result<(), Fail> {
-        if self.current.get() == SocketState::Closing {
+        if self.current == SocketState::Closing {
             let cause: String = format!("socket is closing");
             error!("ensure_not_closing(): {}", cause);
             return Err(Fail::new(libc::EBADF, &cause));
@@ -362,30 +294,12 @@ impl SocketStateMachine {
 
     /// Ensures that the target [SocketState] is not closed.
     fn ensure_not_closed(&self) -> Result<(), Fail> {
-        if self.current.get() == SocketState::Closed {
+        if self.current == SocketState::Closed {
             let cause: String = format!("socket is closed");
             error!("ensure_not_closed(): {}", cause);
             return Err(Fail::new(libc::EBADF, &cause));
         }
         Ok(())
-    }
-
-    fn get_state(&self) -> SocketState {
-        self.current.get()
-    }
-}
-
-//======================================================================================================================
-// Trait Implementations
-//======================================================================================================================
-
-impl PartialEq for SocketStateMachine {
-    fn eq(&self, other: &Self) -> bool {
-        self.get_state() == other.get_state()
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.get_state() != other.get_state()
     }
 }
 

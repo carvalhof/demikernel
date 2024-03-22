@@ -5,43 +5,48 @@ mod acknowledger;
 mod retransmitter;
 mod sender;
 
-use self::{
-    acknowledger::acknowledger,
-    retransmitter::retransmitter,
-    sender::sender,
-};
+// use self::{
+//     acknowledger::acknowledger,
+//     retransmitter::retransmitter,
+//     sender::sender,
+// };
 use crate::{
     inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock,
     runtime::{
         network::NetworkRuntime,
-        QDesc,
+        scheduler::Yielder,
+        // QDesc,
     },
 };
 use ::futures::{
-    channel::mpsc,
+    // channel::mpsc,
     pin_mut,
     FutureExt,
 };
 
-pub async fn background<N: NetworkRuntime>(cb: SharedControlBlock<N>, _dead_socket_tx: mpsc::UnboundedSender<QDesc>) {
-    let acknowledger = acknowledger(cb.clone()).fuse();
-    futures::pin_mut!(acknowledger);
+pub async fn background<N: NetworkRuntime>(cb: *mut SharedControlBlock<N>, transport: N) {
+    // let yielder_acknowledger: Yielder = Yielder::new();
+    // let acknowledger = acknowledger(cb.clone(), yielder_acknowledger).fuse();
+    // futures::pin_mut!(acknowledger);
 
-    let retransmitter = retransmitter(cb.clone()).fuse();
-    futures::pin_mut!(retransmitter);
+    // let yielder_retransmitter: Yielder = Yielder::new();
+    // let retransmitter = retransmitter(cb.clone(), yielder_retransmitter).fuse();
+    // futures::pin_mut!(retransmitter);
 
-    let sender = sender(cb.clone()).fuse();
-    futures::pin_mut!(sender);
+    // let yielder_sender: Yielder = Yielder::new();
+    // let sender = sender(cb.clone(), yielder_sender).fuse();
+    // futures::pin_mut!(sender);
 
-    let mut cb2: SharedControlBlock<N> = cb.clone();
-    let receiver = cb2.poll().fuse();
+    let yielder_receiver: Yielder = Yielder::new();
+    // let mut cb2: SharedControlBlock<N> = cb.clone();
+    let receiver = unsafe { (*cb).poll(yielder_receiver, transport).fuse() };
     pin_mut!(receiver);
 
     let r = futures::select_biased! {
         r = receiver => r,
-        r = acknowledger => r,
-        r = retransmitter => r,
-        r = sender => r,
+        // r = acknowledger => r,
+        // r = retransmitter => r,
+        // r = sender => r,
     };
     error!("Connection terminated: {:?}", r);
 }

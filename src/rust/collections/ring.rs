@@ -31,6 +31,7 @@ use std::{
     },
 };
 
+#[cfg(feature = "profiler")]
 use crate::timer;
 
 //======================================================================================================================
@@ -117,7 +118,8 @@ where
 {
     /// Creates a ring buffer.
     #[allow(unused)]
-    fn new<'a>(capacity: usize) -> Result<RingBuffer<T, S>, Fail> {
+    pub fn new<'a>(capacity: usize) -> Result<RingBuffer<T, S>, Fail> {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::new");
         assert!(mem::size_of::<S>() > 0);
 
@@ -164,6 +166,7 @@ where
     /// Returns the effective capacity of the target ring buffer.
     #[allow(unused)]
     pub fn capacity(&self) -> S {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::capacity");
         // Safety: capacity fits in S, as validated during construction.
         S::from_usize(self.buffer.capacity() - 1)
@@ -172,6 +175,7 @@ where
     /// Peeks the target ring buffer and checks if it is full.
     #[allow(unused)]
     pub fn is_full(&self) -> bool {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::is_null");
         let front_cached: S = self.get_front();
         let back_cached: S = self.get_back();
@@ -187,6 +191,7 @@ where
     /// Peeks the target ring buffer and checks if it is empty.
     #[allow(unused)]
     pub fn is_empty(&self) -> bool {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::is_empty");
         let front_cached: S = self.get_front();
         let back_cached: S = self.get_back();
@@ -208,6 +213,7 @@ where
 
     /// Atomically load and acquire the `front` index.
     fn get_front(&self) -> S {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::get_front");
         S::atomic_load_acquire(unsafe { &mut *self.front_ptr })
     }
@@ -215,12 +221,14 @@ where
     /// Atomically store and release the `front` index.
     #[allow(unused)]
     fn set_front(&self, val: S) {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::set_front");
         S::atomic_store_release(unsafe { &mut *self.front_ptr }, val);
     }
 
     /// Atomically load and acquire the `back` index.
     fn get_back(&self) -> S {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::get_back");
         S::atomic_load_acquire(unsafe { &mut *self.back_ptr })
     }
@@ -228,6 +236,7 @@ where
     /// Atomically store and release the `back` index.
     #[allow(unused)]
     fn set_back(&self, val: S) {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::set_back");
         S::atomic_store_release(unsafe { &mut *self.back_ptr }, val);
     }
@@ -449,6 +458,7 @@ where
 {
     /// Constructs a ring buffer from raw parts.
     fn from_raw_parts(init: bool, mut ptr: *mut u8, size: usize) -> Result<RingBuffer<T, S>, Fail> {
+        #[cfg(feature = "profiler")]
         timer!("collections::ring::from_raw_parts");
         // Check if we have a valid pointer.
         if ptr.is_null() {

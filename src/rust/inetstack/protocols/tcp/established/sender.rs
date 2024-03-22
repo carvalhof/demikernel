@@ -2,8 +2,6 @@
 // Licensed under the MIT license.
 
 use crate::{
-    collections::async_value::SharedAsyncValue,
-    expect_ok,
     inetstack::protocols::tcp::{
         established::SharedControlBlock,
         segment::TcpHeader,
@@ -13,6 +11,7 @@ use crate::{
         fail::Fail,
         memory::DemiBuffer,
         network::NetworkRuntime,
+        watched::SharedWatchedValue,
     },
 };
 use ::libc::{
@@ -65,22 +64,22 @@ pub struct Sender {
     //
 
     // Sequence Number of the oldest byte of unacknowledged sent data.  In RFC 793 terms, this is SND.UNA.
-    pub send_unacked: SharedAsyncValue<SeqNumber>,
+    pub send_unacked: SharedWatchedValue<SeqNumber>,
 
     // Queue of unacknowledged sent data.  RFC 793 calls this the "retransmission queue".
     unacked_queue: RefCell<VecDeque<UnackedSegment>>,
 
     // Sequence Number of the next data to be sent.  In RFC 793 terms, this is SND.NXT.
-    send_next: SharedAsyncValue<SeqNumber>,
+    send_next: SharedWatchedValue<SeqNumber>,
 
     // This is the send buffer (user data we do not yet have window to send).
     unsent_queue: RefCell<VecDeque<DemiBuffer>>,
 
     // TODO: Remove this as soon as sender.rs is fixed to not use it to tell if there is unsent data.
-    unsent_seq_no: SharedAsyncValue<SeqNumber>,
+    unsent_seq_no: SharedWatchedValue<SeqNumber>,
 
     // Available window to send into, as advertised by our peer.  In RFC 793 terms, this is SND.WND.
-    send_window: SharedAsyncValue<u32>,
+    send_window: SharedWatchedValue<u32>,
     send_window_last_update_seq: Cell<SeqNumber>, // SND.WL1
     send_window_last_update_ack: Cell<SeqNumber>, // SND.WL2
 
@@ -108,13 +107,13 @@ impl fmt::Debug for Sender {
 impl Sender {
     pub fn new(seq_no: SeqNumber, send_window: u32, window_scale: u8, mss: usize) -> Self {
         Self {
-            send_unacked: SharedAsyncValue::new(seq_no),
+            send_unacked: SharedWatchedValue::new(seq_no),
             unacked_queue: RefCell::new(VecDeque::new()),
-            send_next: SharedAsyncValue::new(seq_no),
+            send_next: SharedWatchedValue::new(seq_no),
             unsent_queue: RefCell::new(VecDeque::new()),
-            unsent_seq_no: SharedAsyncValue::new(seq_no),
+            unsent_seq_no: SharedWatchedValue::new(seq_no),
 
-            send_window: SharedAsyncValue::new(send_window),
+            send_window: SharedWatchedValue::new(send_window),
             send_window_last_update_seq: Cell::new(seq_no),
             send_window_last_update_ack: Cell::new(seq_no),
 
@@ -127,15 +126,15 @@ impl Sender {
         self.mss
     }
 
-    pub fn get_send_window(&self) -> SharedAsyncValue<u32> {
+    pub fn get_send_window(&self) -> SharedWatchedValue<u32> {
         self.send_window.clone()
     }
 
-    pub fn get_send_unacked(&self) -> SharedAsyncValue<SeqNumber> {
+    pub fn get_send_unacked(&self) -> SharedWatchedValue<SeqNumber> {
         self.send_unacked.clone()
     }
 
-    pub fn get_send_next(&self) -> SharedAsyncValue<SeqNumber> {
+    pub fn get_send_next(&self) -> SharedWatchedValue<SeqNumber> {
         self.send_next.clone()
     }
 
@@ -143,7 +142,7 @@ impl Sender {
         self.send_next.modify(f)
     }
 
-    pub fn get_unsent_seq_no(&self) -> SharedAsyncValue<SeqNumber> {
+    pub fn get_unsent_seq_no(&self) -> SharedWatchedValue<SeqNumber> {
         self.unsent_seq_no.clone()
     }
 
@@ -153,7 +152,7 @@ impl Sender {
 
     // This is the main TCP send routine.
     //
-    pub fn send<N: NetworkRuntime>(&mut self, buf: DemiBuffer, mut cb: SharedControlBlock<N>) -> Result<(), Fail> {
+    pub fn send<N: NetworkRuntime>(&mut self, buf: DemiBuffer, cb: *mut SharedControlBlock<N>) -> Result<(), Fail> {
         // If the user is done sending (i.e. has called close on this connection), then they shouldn't be sending.
 
         // Our API supports send buffers up to usize (variable, depends upon architecture) in size.  While we could
@@ -197,23 +196,23 @@ impl Sender {
             let in_flight_after_send: u32 = sent_data + buf_len;
 
             // Before we get cwnd for the check, we prompt it to shrink it if the connection has been idle.
-            cb.congestion_control_on_cwnd_check_before_send();
-            let cwnd: SharedAsyncValue<u32> = cb.congestion_control_get_cwnd();
+            unsafe { (*cb).congestion_control_on_cwnd_check_before_send() };
+            let cwnd: SharedWatchedValue<u32> = unsafe { (*cb).congestion_control_get_cwnd() };
 
             // The limited transmit algorithm can increase the effective size of cwnd by up to 2MSS.
-            let effective_cwnd: u32 = cwnd.get() + cb.congestion_control_get_limited_transmit_cwnd_increase().get();
+            let effective_cwnd: u32 = cwnd.get() + unsafe { (*cb).congestion_control_get_limited_transmit_cwnd_increase().get() };
 
             let win_sz: u32 = self.send_window.get();
 
             if win_sz > 0 && win_sz >= in_flight_after_send && effective_cwnd >= in_flight_after_send {
-                if let Some(remote_link_addr) = cb.arp().try_query(cb.get_remote().ip().clone()) {
+                // if let Some(remote_link_addr) = cb.arp().try_query(cb.get_remote().ip().clone()) {
                     // This hook is primarily intended to record the last time we sent data, so we can later tell if
                     // the connection has been idle.
-                    let rto: Duration = cb.rto();
-                    cb.congestion_control_on_send(rto, sent_data);
+                    let rto: Duration = unsafe { (*cb).rto() };
+                    unsafe { (*cb).congestion_control_on_send(rto, sent_data) };
 
                     // Prepare the segment and send it.
-                    let mut header: TcpHeader = cb.tcp_header();
+                    let mut header: TcpHeader = unsafe { (*cb).tcp_header() };
                     header.seq_num = send_next;
                     if buf_len == 0 {
                         // This buffer is the end-of-send marker.
@@ -224,7 +223,7 @@ impl Sender {
                         header.psh = true;
                     }
                     trace!("Send immediate");
-                    cb.emit(header, Some(buf.clone()), remote_link_addr);
+                    unsafe { (*cb).emit(header, Some(buf.clone()), (*cb).remote_link_addr); }
 
                     // Update SND.NXT.
                     self.send_next.modify(|s| s + SeqNumber::from(buf_len));
@@ -235,20 +234,22 @@ impl Sender {
                     // Put the segment we just sent on the retransmission queue.
                     let unacked_segment = UnackedSegment {
                         bytes: buf,
-                        initial_tx: Some(cb.get_now()),
+                        initial_tx: Some(Instant::now()),
                     };
                     self.unacked_queue.borrow_mut().push_back(unacked_segment);
 
                     // Start the retransmission timer if it isn't already running.
-                    if cb.get_retransmit_deadline().is_none() {
-                        let rto: Duration = cb.rto();
-                        cb.set_retransmit_deadline(Some(cb.get_now() + rto));
+                    unsafe { 
+                        if (*cb).get_retransmit_deadline().is_none() {
+                            let rto: Duration = (*cb).rto();
+                            (*cb).set_retransmit_deadline(Some(Instant::now() + rto));
+                        }
                     }
 
                     return Ok(());
-                } else {
-                    warn!("no ARP cache entry for send");
-                }
+                // } else {
+                //     warn!("no ARP cache entry for send");
+                // }
             }
         }
 
@@ -261,7 +262,7 @@ impl Sender {
         // Slow path: Delegating sending the data to background processing.
         trace!("Queueing Send for background processing");
         self.unsent_queue.borrow_mut().push_back(buf);
-        self.unsent_seq_no.modify(|s| s + SeqNumber::from(buf_len));
+        // self.unsent_seq_no.modify(|s| s + SeqNumber::from(buf_len));
 
         Ok(())
     }
@@ -320,10 +321,10 @@ impl Sender {
 
                 if segment.bytes.len() > bytes_remaining {
                     // Only some of the data in this segment has been acked.  Remove just the acked amount.
-                    expect_ok!(
-                        segment.bytes.adjust(bytes_remaining),
-                        "'segment' should contain at least 'bytes_remaining'"
-                    );
+                    segment
+                        .bytes
+                        .adjust(bytes_remaining)
+                        .expect("'segment' should contain at least 'bytes_remaining'");
                     segment.initial_tx = None;
 
                     // Leave this segment on the unacknowledged queue.
@@ -356,11 +357,10 @@ impl Sender {
         let buf_len: usize = buf.len();
 
         // Pop one byte off the buf still in the queue and all but one of the bytes on our clone.
-        expect_ok!(buf.adjust(1), "'buf' should contain at least one byte");
-        expect_ok!(
-            cloned_buf.trim(buf_len - 1),
-            "'cloned_buf' should contain at least one less than its professed length"
-        );
+        buf.adjust(1).expect("'buf' should contain at least one byte");
+        cloned_buf
+            .trim(buf_len - 1)
+            .expect("'cloned_buf' should contain at least one less than its professed length");
 
         Some(cloned_buf)
     }
@@ -375,11 +375,11 @@ impl Sender {
         if buf_len > max_bytes {
             let mut cloned_buf: DemiBuffer = buf.clone();
 
-            expect_ok!(buf.adjust(max_bytes), "'buf' should contain at least 'max_bytes'");
-            expect_ok!(
-                cloned_buf.trim(buf_len - max_bytes),
-                "'cloned_buf' should contain at least less than its length"
-            );
+            buf.adjust(max_bytes)
+                .expect("'buf' should contain at least 'max_bytes'");
+            cloned_buf
+                .trim(buf_len - max_bytes)
+                .expect("'cloned_buf' should contain at least less than its length");
 
             unsent_queue.push_front(buf);
             buf = cloned_buf;

@@ -45,10 +45,6 @@ use ::std::{
     },
 };
 
-/// A default amount of time to wait on an operation to complete. This was chosen arbitrarily.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
-
-#[derive(Clone)]
 pub struct SharedEngine(SharedNetworkLibOS<SharedInetStack<SharedTestRuntime>>);
 
 impl SharedEngine {
@@ -85,7 +81,6 @@ impl SharedEngine {
         self.get_transport().receive(bytes)?;
         // So poll the scheduler to do the processing.
         self.get_runtime().poll();
-        self.get_runtime().poll();
 
         Ok(())
     }
@@ -113,7 +108,7 @@ impl SharedEngine {
 
     pub fn udp_close(&mut self, socket_fd: QDesc) -> Result<(), Fail> {
         let qt = self.async_close(socket_fd)?;
-        match self.wait(qt, DEFAULT_TIMEOUT)? {
+        match self.wait(qt)? {
             (_, OperationResult::Close) => Ok(()),
             _ => unreachable!("close did not succeed"),
         }
@@ -152,7 +147,7 @@ impl SharedEngine {
         self.listen(socket_fd, backlog)
     }
 
-    pub async fn arp_query(self, ipv4_addr: Ipv4Addr) -> Result<MacAddress, Fail> {
+    pub async fn arp_query(&mut self, ipv4_addr: Ipv4Addr) -> Result<MacAddress, Fail> {
         self.get_transport().arp_query(ipv4_addr).await
     }
 
@@ -164,27 +159,12 @@ impl SharedEngine {
         self.get_runtime().poll()
     }
 
-    pub fn wait(&self, qt: QToken, timeout: Duration) -> Result<(QDesc, OperationResult), Fail> {
-        // First check if the task has already completed.
-        if let Some(result) = self.get_runtime().get_completed_task(&qt) {
-            return Ok(result);
+    pub fn wait(&self, qt: QToken) -> Result<(QDesc, OperationResult), Fail> {
+        while !self.get_runtime().has_completed(qt)? {
+            self.poll()
         }
-
-        // Otherwise, run the scheduler.
-        // Put the QToken into a single element array.
-        let qt_array: [QToken; 1] = [qt];
-        let start: Instant = Instant::now();
-
-        // Call run_any() until the task finishes.
-        while Instant::now() <= start + timeout {
-            // Run for one quanta and if one of our queue tokens completed, then return.
-            if let Some((offset, qd, qr)) = self.get_runtime().run_any(&qt_array) {
-                debug_assert_eq!(offset, 0);
-                return Ok((qd, qr));
-            }
-        }
-
-        Err(Fail::new(libc::ETIMEDOUT, "wait timed out"))
+        let (qd, result): (QDesc, OperationResult) = self.get_runtime().remove_coroutine(qt);
+        Ok((qd, result))
     }
 }
 

@@ -14,13 +14,14 @@ use super::{
 };
 use crate::{
     collections::{
+        dpdk_spinlock::DPDKSpinLock,
+        dpdk_ring::DPDKRing,
+        dpdk_ring2::DPDKRing2,
         async_queue::{
             AsyncQueue,
             SharedAsyncQueue,
         },
-        async_value::SharedAsyncValue,
     },
-    expect_ok,
     inetstack::protocols::{
         arp::SharedArpPeer,
         ethernet2::{
@@ -45,11 +46,14 @@ use crate::{
             types::MacAddress,
             NetworkRuntime,
         },
+        scheduler::Yielder,
+        timer::SharedTimer,
+        watched::SharedWatchedValue,
         SharedDemiRuntime,
         SharedObject,
     },
 };
-use ::futures::never::Never;
+// use ::futures::never::Never;
 use ::std::{
     collections::VecDeque,
     convert::TryInto,
@@ -114,33 +118,42 @@ struct Receiver {
 
     // Receive queue.  Contains in-order received (and acknowledged) data ready for the application to read.
     recv_queue: AsyncQueue<DemiBuffer>,
+
+    pub lock: *mut DPDKSpinLock,
 }
 
 impl Receiver {
-    pub fn new(reader_next: SeqNumber, receive_next: SeqNumber) -> Self {
+    pub fn new(reader_next: SeqNumber, receive_next: SeqNumber, lock: *mut DPDKSpinLock) -> Self {
         Self {
             reader_next,
             receive_next,
             recv_queue: AsyncQueue::with_capacity(RECV_QUEUE_SZ),
+            lock,
         }
     }
 
-    pub async fn pop(&mut self, size: Option<usize>) -> Result<DemiBuffer, Fail> {
-        let buf: DemiBuffer = if let Some(size) = size {
-            let mut buf: DemiBuffer = self.recv_queue.pop(None).await?;
-            // Split the buffer if it's too big.
-            if buf.len() > size {
-                buf.split_front(size)?
-            } else {
-                buf
+    pub async fn pop(&mut self, _size: Option<usize>, yielder: Yielder) -> Result<DemiBuffer, Fail> {
+        loop {
+            if unsafe { (*self.lock).trylock() } {
+                if let Some(buf) = self.recv_queue.try_pop() {
+                    self.reader_next = self.reader_next + SeqNumber::from(buf.len() as u32);
+                    unsafe { (*self.lock).unlock() };
+                    return Ok(buf);
+                }
+                unsafe { (*self.lock).unlock() };
             }
-        } else {
-            self.recv_queue.pop(None).await?
-        };
+            yielder.yield_once().await?;
+        }
+    }
 
-        self.reader_next = self.reader_next + SeqNumber::from(buf.len() as u32);
-
-        Ok(buf)
+    pub fn try_pop(&mut self) -> Option<DemiBuffer> {
+        match self.recv_queue.try_pop() {
+            Some(buf) => {
+                self.reader_next = self.reader_next + SeqNumber::from(buf.len() as u32);
+                Some(buf)
+            }
+            None => None
+        }
     }
 
     pub fn push(&mut self, buf: DemiBuffer) {
@@ -156,10 +169,11 @@ pub struct ControlBlock<N: NetworkRuntime> {
     local: SocketAddrV4,
     remote: SocketAddrV4,
 
-    transport: N,
+    pub transport: N,
     #[allow(unused)]
     runtime: SharedDemiRuntime,
     local_link_addr: MacAddress,
+    pub remote_link_addr: MacAddress,
     tcp_config: TcpConfig,
 
     // TODO: We shouldn't be keeping anything datalink-layer specific at this level.  The IP layer should be holding
@@ -167,14 +181,14 @@ pub struct ControlBlock<N: NetworkRuntime> {
     arp: SharedArpPeer<N>,
 
     // Send-side state information.  TODO: Consider incorporating this directly into ControlBlock.
-    sender: Sender,
+    pub sender: Sender,
 
     // TCP Connection State.
     state: State,
 
     ack_delay_timeout: Duration,
 
-    ack_deadline: SharedAsyncValue<Option<Instant>>,
+    ack_deadline: SharedWatchedValue<Option<Instant>>,
 
     // This is our receive buffer size, which is also the maximum size of our receive window.
     // Note: The maximum possible advertised window is 1 GiB with window scaling and 64 KiB without.
@@ -206,7 +220,7 @@ pub struct ControlBlock<N: NetworkRuntime> {
 
     // Current retransmission timer expiration time.
     // TODO: Consider storing this directly in the RtoCalculator.
-    retransmit_deadline: SharedAsyncValue<Option<Instant>>,
+    retransmit_deadline: SharedWatchedValue<Option<Instant>>,
 
     // Retransmission Timeout (RTO) calculator.
     rto_calculator: RtoCalculator,
@@ -215,6 +229,10 @@ pub struct ControlBlock<N: NetworkRuntime> {
     recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
 
     ack_queue: SharedAsyncQueue<usize>,
+
+    pub lock: *mut DPDKSpinLock,
+    pub aux_pop_queue: *mut DPDKRing2,
+    pub aux_push_queue: *mut DPDKRing,
 }
 
 #[derive(Clone)]
@@ -242,6 +260,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         congestion_control_options: Option<congestion_control::Options>,
         recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
         ack_queue: SharedAsyncQueue<usize>,
+        lock: *mut DPDKSpinLock,
+        aux_pop_queue: *mut DPDKRing2,
+        aux_push_queue: *mut DPDKRing,
     ) -> Self {
         let sender: Sender = Sender::new(sender_seq_no, sender_window_size, sender_window_scale, sender_mss);
         Self(SharedObject::<ControlBlock<N>>::new(ControlBlock {
@@ -250,23 +271,31 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             runtime,
             transport,
             local_link_addr,
+            remote_link_addr: MacAddress::parse_str("10:70:fd:45:57:24").unwrap(),
             tcp_config,
             arp,
             sender,
             state: State::Established,
             ack_delay_timeout,
-            ack_deadline: SharedAsyncValue::new(None),
+            ack_deadline: SharedWatchedValue::new(None),
             receive_buffer_size: receiver_window_size,
             window_scale: receiver_window_scale,
             out_of_order: VecDeque::new(),
             out_of_order_fin: Option::None,
-            receiver: Receiver::new(receiver_seq_no, receiver_seq_no),
+            receiver: Receiver::new(receiver_seq_no, receiver_seq_no, lock),
             cc: cc_constructor(sender_mss, sender_seq_no, congestion_control_options),
-            retransmit_deadline: SharedAsyncValue::new(None),
+            retransmit_deadline: SharedWatchedValue::new(None),
             rto_calculator: RtoCalculator::new(),
             recv_queue,
             ack_queue,
+            lock,
+            aux_pop_queue,
+            aux_push_queue,
         }))
+    }
+
+    pub fn try_pop(&mut self) -> Option<DemiBuffer> {
+        self.receiver.try_pop()
     }
 
     pub fn get_local(&self) -> SocketAddrV4 {
@@ -282,16 +311,15 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.arp.clone()
     }
 
-    pub fn send(&mut self, buf: DemiBuffer) -> Result<(), Fail> {
-        let self_: Self = self.clone();
-        self.sender.send(buf, self_)
+    pub fn send(&mut self, _buf: DemiBuffer) -> Result<(), Fail> {
+        todo!()
     }
 
     pub fn retransmit(&self) {
         self.sender.retransmit(self.clone())
     }
 
-    pub fn congestion_control_watch_retransmit_now_flag(&self) -> SharedAsyncValue<bool> {
+    pub fn congestion_control_watch_retransmit_now_flag(&self) -> SharedWatchedValue<bool> {
         self.cc.get_retransmit_now_flag()
     }
 
@@ -311,11 +339,11 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.cc.on_cwnd_check_before_send()
     }
 
-    pub fn congestion_control_get_cwnd(&self) -> SharedAsyncValue<u32> {
+    pub fn congestion_control_get_cwnd(&self) -> SharedWatchedValue<u32> {
         self.cc.get_cwnd()
     }
 
-    pub fn congestion_control_get_limited_transmit_cwnd_increase(&self) -> SharedAsyncValue<u32> {
+    pub fn congestion_control_get_limited_transmit_cwnd_increase(&self) -> SharedWatchedValue<u32> {
         self.cc.get_limited_transmit_cwnd_increase()
     }
 
@@ -323,19 +351,19 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.sender.get_mss()
     }
 
-    pub fn get_send_window(&self) -> SharedAsyncValue<u32> {
+    pub fn get_send_window(&self) -> SharedWatchedValue<u32> {
         self.sender.get_send_window()
     }
 
-    pub fn get_send_unacked(&self) -> SharedAsyncValue<SeqNumber> {
+    pub fn get_send_unacked(&self) -> SharedWatchedValue<SeqNumber> {
         self.sender.get_send_unacked()
     }
 
-    pub fn get_unsent_seq_no(&self) -> SharedAsyncValue<SeqNumber> {
+    pub fn get_unsent_seq_no(&self) -> SharedWatchedValue<SeqNumber> {
         self.sender.get_unsent_seq_no()
     }
 
-    pub fn get_send_next(&self) -> SharedAsyncValue<SeqNumber> {
+    pub fn get_send_next(&self) -> SharedWatchedValue<SeqNumber> {
         self.sender.get_send_next()
     }
 
@@ -351,7 +379,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.retransmit_deadline.set(when);
     }
 
-    pub fn watch_retransmit_deadline(&self) -> SharedAsyncValue<Option<Instant>> {
+    pub fn watch_retransmit_deadline(&self) -> SharedWatchedValue<Option<Instant>> {
         self.retransmit_deadline.clone()
     }
 
@@ -383,6 +411,10 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.sender.pop_one_unsent_byte()
     }
 
+    pub fn get_timer(&self) -> SharedTimer {
+        self.runtime.get_timer()
+    }
+
     pub fn get_now(&self) -> Instant {
         self.runtime.get_now()
     }
@@ -392,50 +424,92 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
     }
 
     // This is the main TCP processing routine.
-    pub async fn poll(&mut self) -> Result<Never, Fail> {
+    pub async fn poll(&mut self, yielder: Yielder, transport: N) {
         // Normal data processing in the Established state.
+        let cb: *mut SharedControlBlock<N> = self as *mut Self as *mut SharedControlBlock<N>;
+
         loop {
-            let (header, data): (TcpHeader, DemiBuffer) = match self.recv_queue.pop(None).await {
-                Ok((_, header, data)) if self.state == State::Established => (header, data),
-                Ok(result) => {
-                    self.recv_queue.push_front(result);
-                    let cause: String = format!(
-                        "ending receive polling loop for non-established connection (local={:?}, remote={:?})",
-                        self.local, self.remote
-                    );
-                    error!("poll(): {}", cause);
-                    return Err(Fail::new(libc::ECANCELED, &cause));
-                },
-                Err(e) => {
-                    let cause: String = format!(
-                        "ending receive polling loop for active connection (local={:?}, remote={:?})",
-                        self.local, self.remote
-                    );
-                    warn!("poll(): {:?} ({:?})", cause, e);
-                    return Err(e);
-                },
-            };
+            if unsafe { (*(*cb).lock).trylock() } {
+                unsafe {
+                    let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
+                    std::mem::forget(old_transport);
 
-            debug!(
-                "{:?} Connection Receiving {} bytes + {:?}",
-                self.state,
-                data.len(),
-                header
-            );
+                    // Maybe change this to a for and use Batching for TX
+                    if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+                        let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
+                        (*cb).sender.send(buf, cb).unwrap();
+                    }
+                }
 
-            match self.process_packet(header, data) {
-                Ok(()) => (),
-                Err(e) if e.errno == libc::ECONNRESET => {
-                    self.state = State::CloseWait;
-                    let cause: String = format!(
-                        "remote closed connection, stopping processing (local={:?}, remote={:?})",
-                        self.local, self.remote
-                    );
-                    error!("poll(): {}", cause);
-                    return Err(Fail::new(libc::ECANCELED, &cause));
-                },
-                Err(e) => debug!("Dropped packet: {:?}", e),
+                let (header, data) = unsafe {
+                    match (*(*cb).aux_pop_queue).dequeue::<(*mut Ipv4Header, *mut TcpHeader, *mut crate::runtime::libdpdk::rte_mbuf)>() {
+                        Some((ip_hdr_ptr, tcp_hdr_ptr, data_ptr)) => {
+                            let _ip_hdr = Box::from_raw(ip_hdr_ptr);
+                            let tcp_hdr = Box::from_raw(tcp_hdr_ptr);
+                            let data = DemiBuffer::from_mbuf(data_ptr);
+
+                            (*tcp_hdr, data)
+                        }
+                        None => {
+                            (*(*cb).lock).unlock();
+                            yielder.yield_once().await.unwrap();
+                            continue;
+                        }
+                    }
+                };
+
+                match self.process_packet(header, data) {
+                    Ok(()) => (),
+                    Err(e) => panic!("Dropped incoming packet: {:?}", e),
+                };
+                
+                // unsafe {
+                //     // Maybe change this to a for and use Batching for TX
+                //     while let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+                //         let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
+                //         (*cb).sender.send(buf, cb).unwrap();
+                //     }
+                // }
+
+                unsafe { (*(*cb).lock).unlock() };
             }
+
+            // unsafe {
+            //     if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+            //         (*(*cb).lock).lock();
+
+            //         let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
+            //         std::mem::forget(old_transport);
+                    
+            //         let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
+            //         (*cb).sender.send(buf, cb).unwrap();
+
+            //         while let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+            //             let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
+            //             (*cb).sender.send(buf, cb).unwrap();
+            //         }
+
+            //         (*(*cb).lock).unlock();
+            //     }
+
+            //     if let Some(item) = (*(*cb).aux_pop_queue).dequeue::<(*mut Ipv4Header, *mut TcpHeader, *mut crate::runtime::libdpdk::rte_mbuf)>() {
+            //         (*(*cb).lock).lock();
+
+            //         let header = *Box::from_raw(item.1);
+            //         let data = DemiBuffer::from_mbuf(item.2);
+
+            //         let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
+            //         std::mem::forget(old_transport);
+
+            //         match self.process_packet(header, data) {
+            //             Ok(()) => (),
+            //             Err(e) => panic!("Dropped incoming packet: {:?}", e),
+            //         };
+            //         (*(*cb).lock).unlock();
+            //     }
+            // }
+
+            yielder.yield_once().await.unwrap();
         }
     }
 
@@ -465,19 +539,19 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.process_remote_close(&header)?;
         // We should ACK this segment, preferably via piggybacking on a response.
         // TODO: Consider replacing the delayed ACK timer with a simple flag.
-        if self.ack_deadline.get().is_none() {
-            // Start the delayed ACK timer to ensure an ACK gets sent soon even if no piggyback opportunity occurs.
-            let timeout: Duration = self.ack_delay_timeout;
-            // Getting the current time is extremely cheap as it is just a variable lookup.
-            let now: Instant = self.get_now();
-            self.ack_deadline.set(Some(now + timeout));
-        } else {
-            // We already owe our peer an ACK (the timer was already running), so cancel the timer and ACK now.
-            self.ack_deadline.set(None);
-            trace!("process_packet(): sending ack on deadline expiration");
-            self.send_ack();
-        }
-
+        // if self.ack_deadline.get().is_none() {
+        //     // Start the delayed ACK timer to ensure an ACK gets sent soon even if no piggyback opportunity occurs.
+        //     let timeout: Duration = self.ack_delay_timeout;
+        //     // Getting the current time is extremely cheap as it is just a variable lookup.
+        //     let now: Instant = Instant::now();//self.get_timer().now();
+        //     self.ack_deadline.set(Some(now + timeout));
+        // } else {
+        //     // We already owe our peer an ACK (the timer was already running), so cancel the timer and ACK now.
+        //     self.ack_deadline.set(None);
+        //     trace!("process_packet(): sending ack on deadline expiration");
+        //     self.send_ack();
+        // }
+        
         Ok(())
     }
 
@@ -524,7 +598,6 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         }
 
         let receive_next: SeqNumber = self.receiver.receive_next;
-
         let after_receive_window: SeqNumber = receive_next + SeqNumber::from(self.get_receive_window_size());
 
         // Check if this segment fits in our receive window.
@@ -555,10 +628,8 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                         header.syn = false;
                         duplicate -= 1;
                     }
-                    expect_ok!(
-                        data.adjust(duplicate as usize),
-                        "'data' should contain at least 'duplicate' bytes"
-                    );
+                    data.adjust(duplicate as usize)
+                        .expect("'data' should contain at least 'duplicate' bytes");
                 }
             } else {
                 // This segment contains entirely new data, but is later in the sequence than what we're expecting.
@@ -593,10 +664,8 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                 header.fin = false;
                 excess -= 1;
             }
-            expect_ok!(
-                data.trim(excess as usize),
-                "'data' should contain at least 'excess' bytes"
-            );
+            data.trim(excess as usize)
+                .expect("'data' should contain at least 'excess' bytes");
         }
 
         // From here on, the entire new segment (including any SYN or FIN flag remaining) is in the window.
@@ -675,7 +744,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             if header.ack_num <= send_next {
                 // Does not matter when we get this since the clock will not move between the beginning of packet
                 // processing and now without a call to advance_clock.
-                let now: Instant = self.get_now();
+                let now: Instant = Instant::now();//self.get_timer().now();
 
                 // This segment acknowledges new data (possibly and/or FIN).
                 let bytes_acknowledged: u32 = (header.ack_num - send_unacknowledged).into();
@@ -786,11 +855,13 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         let seq_num: SeqNumber = self.get_send_next().get();
         header.seq_num = seq_num;
 
-        // TODO: Remove this if clause once emit() is fixed to not require the remote hardware addr (this should be
-        // left to the ARP layer and not exposed to TCP).
-        if let Some(remote_link_addr) = self.arp().try_query(self.remote.ip().clone()) {
-            self.emit(header, None, remote_link_addr);
-        }
+        // // TODO: Remove this if clause once emit() is fixed to not require the remote hardware addr (this should be
+        // // left to the ARP layer and not exposed to TCP).
+        // if let Some(remote_link_addr) = self.arp().try_query(self.remote.ip().clone()) {
+        //     self.emit(header, None, remote_link_addr);
+        // }
+
+        self.emit(header, None, self.remote_link_addr);
     }
 
     /// Transmit this message to our connected peer.
@@ -808,6 +879,10 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         debug_assert!(header.ack);
 
         let sent_fin: bool = header.fin;
+        let body_size = match &body {
+            Some(buf) => buf.len(),
+            None => 0,
+        };
 
         // Prepare description of TCP segment to send.
         // TODO: Change this to call lower levels to fill in their header information, handle routing, ARPing, etc.
@@ -817,6 +892,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             tcp_hdr: header,
             data: body,
             tx_checksum_offload: self.tcp_config.get_tx_checksum_offload(),
+            body_size,
         };
 
         // Call the runtime to send the segment.
@@ -847,7 +923,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.sender.remote_mss()
     }
 
-    pub fn get_ack_deadline(&self) -> SharedAsyncValue<Option<Instant>> {
+    pub fn get_ack_deadline(&self) -> SharedWatchedValue<Option<Instant>> {
         self.ack_deadline.clone()
     }
 
@@ -862,7 +938,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
 
     fn hdr_window_size(&self) -> u16 {
         let window_size: u32 = self.get_receive_window_size();
-        let hdr_window_size: u16 = expect_ok!((window_size >> self.window_scale).try_into(), "Window size overflow");
+        let hdr_window_size: u16 = (window_size >> self.window_scale)
+            .try_into()
+            .expect("Window size overflow");
         debug!(
             "Window size -> {} (hdr {}, scale {})",
             (hdr_window_size as u32) << self.window_scale,
@@ -872,9 +950,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         hdr_window_size
     }
 
-    pub async fn push(&mut self, mut nbytes: usize) -> Result<(), Fail> {
+    pub async fn push(&mut self, mut nbytes: usize, yielder: Yielder) -> Result<(), Fail> {
         loop {
-            let n: usize = self.ack_queue.pop(None).await?;
+            let n: usize = self.ack_queue.pop(&yielder).await?;
 
             if n > nbytes {
                 self.ack_queue.push_front(n - nbytes);
@@ -889,7 +967,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         }
     }
 
-    pub async fn pop(&mut self, size: Option<usize>) -> Result<DemiBuffer, Fail> {
+    pub async fn pop(&mut self, size: Option<usize>, yielder: Yielder) -> Result<DemiBuffer, Fail> {
         // TODO: Need to add a way to indicate that the other side closed (i.e. that we've received a FIN).
         // Should we do this via a zero-sized buffer?  Same as with the unsent and unacked queues on the send side?
         //
@@ -897,7 +975,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         //  if self.receiver.reader_next.get() == self.receiver.receive_next.get() {
         // But that will think data is available to be read once we've received a FIN, because FINs consume sequence
         // number space.  Now we call is_empty() on the receive queue instead.
-        self.receiver.pop(size).await
+        self.receiver.pop(size, yielder).await
     }
 
     // This routine remembers that we have received an out-of-order FIN.
@@ -961,10 +1039,8 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                     // Trim the end of the new segment and stop checking for out-of-order overlap.
                     let excess: u32 = u32::from(new_end - stored_start) + 1;
                     new_end = new_end - SeqNumber::from(excess);
-                    expect_ok!(
-                        buf.trim(excess as usize),
-                        "'buf' should contain at least 'excess' bytes"
-                    );
+                    buf.trim(excess as usize)
+                        .expect("'buf' should contain at least 'excess' bytes");
                     break;
                 } else {
                     // The new segment starts at or after the start of this out-of-order segment.
@@ -984,10 +1060,8 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                     // Adjust the beginning of the new segment and continue on to check the next out-of-order segment.
                     let duplicate: u32 = u32::from(stored_end - new_start);
                     new_start = new_start + SeqNumber::from(duplicate);
-                    expect_ok!(
-                        buf.adjust(duplicate as usize),
-                        "'buf' should contain at least 'duplicate' bytes"
-                    );
+                    buf.adjust(duplicate as usize)
+                        .expect("'buf' should contain at least 'duplicate' bytes");
                     continue;
                 }
             }
@@ -1004,9 +1078,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         // If the out-of-order store now contains too many entries, delete the later entries.
         // TODO: The out-of-order store is already limited (in size) by our receive window, while the below check
         // imposes a limit on the number of entries.  Do we need this?  Presumably for attack mitigation?
-        while self.out_of_order.len() > MAX_OUT_OF_ORDER {
-            self.out_of_order.pop_back();
-        }
+        // while self.out_of_order.len() > MAX_OUT_OF_ORDER {
+        //     self.out_of_order.pop_back();
+        // }
     }
 
     // This routine takes an incoming in-order TCP segment and adds the data to the user's receive queue.  If the new
@@ -1106,11 +1180,11 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
     }
 
     // This coroutine runs the close protocol.
-    pub async fn close(&mut self) -> Result<(), Fail> {
+    pub async fn close(&mut self, yielder: Yielder) -> Result<(), Fail> {
         // Assert we are in a valid state and move to new state.
         match self.state {
-            State::Established => self.local_close().await,
-            State::CloseWait => self.remote_already_closed().await,
+            State::Established => self.local_close(yielder).await,
+            State::CloseWait => self.remote_already_closed(yielder).await,
             _ => {
                 let cause: String = format!("socket is already closing");
                 error!("close(): {}", cause);
@@ -1119,7 +1193,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         }
     }
 
-    async fn local_close(&mut self) -> Result<(), Fail> {
+    async fn local_close(&mut self, yielder: Yielder) -> Result<(), Fail> {
         // 0. Set state.
         self.state = State::FinWait1;
         // 1. Send FIN.
@@ -1127,7 +1201,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
 
         while self.state != State::TimeWait {
             // Wait for next packet.
-            let (_, header, _) = self.recv_queue.pop(None).await?;
+            let (_, header, _) = self.recv_queue.pop(&yielder).await?;
 
             // Check ACK.
             self.state = match self.process_ack(&header) {
@@ -1171,7 +1245,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         Ok(())
     }
 
-    async fn remote_already_closed(&mut self) -> Result<(), Fail> {
+    async fn remote_already_closed(&mut self, yielder: Yielder) -> Result<(), Fail> {
         // 0. Set state.
         self.state = State::LastAck;
         // 1. Send FIN.
@@ -1179,7 +1253,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         // Wait for ACK of FIN.
         loop {
             // Wait for next packet.
-            let (_, header, _) = self.recv_queue.pop(None).await?;
+            let (_, header, _) = self.recv_queue.pop(&yielder).await?;
 
             // Check ACK.
             match self.process_ack(&header) {

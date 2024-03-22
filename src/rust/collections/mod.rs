@@ -15,3 +15,9 @@ cfg_if! {
         pub mod concurrent_ring;
     }
 }
+
+pub mod dpdk_ring;
+pub mod dpdk_ring2;
+pub mod dpdk_hashmap;
+pub mod dpdk_hashmap2;
+pub mod dpdk_spinlock;

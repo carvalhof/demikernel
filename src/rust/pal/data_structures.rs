@@ -30,20 +30,26 @@ pub type AddressFamily = WinSock::ADDRESS_FAMILY;
 // Linux data structures
 //==============================================================================
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub type SockAddr = libc::sockaddr;
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub type SockAddrIn = libc::sockaddr_in;
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub type SockAddrIn6 = libc::sockaddr_in6;
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub type Socklen = libc::socklen_t;
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub type SockAddrStorage = libc::sockaddr_storage;
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub type AddressFamily = libc::sa_family_t;

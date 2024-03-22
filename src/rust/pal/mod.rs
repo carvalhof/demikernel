@@ -13,5 +13,6 @@ pub mod arch;
 pub mod constants;
 pub mod data_structures;
 pub mod functions;
+
 #[cfg(target_os = "linux")]
 pub mod linux;

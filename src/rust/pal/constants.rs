@@ -21,11 +21,14 @@ pub const SOMAXCONN: i32 = WinSock::SOMAXCONN as i32;
 // Linux constants
 //==============================================================================
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub const AF_INET: libc::sa_family_t = libc::AF_INET as u16;
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub const AF_INET6: libc::sa_family_t = libc::AF_INET6 as u16;
 
+#[allow(unused)]
 #[cfg(target_os = "linux")]
 pub const SOMAXCONN: i32 = libc::SOMAXCONN;

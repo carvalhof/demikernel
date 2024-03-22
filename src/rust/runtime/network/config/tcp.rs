@@ -9,8 +9,6 @@ use crate::runtime::network::consts::{
     DEFAULT_MSS,
     MAX_MSS,
     MIN_MSS,
-    TCP_ACK_DELAY_TIMEOUT,
-    TCP_HANDSHAKE_TIMEOUT,
 };
 use ::std::time::Duration;
 
@@ -180,9 +178,9 @@ impl Default for TcpConfig {
         TcpConfig {
             advertised_mss: DEFAULT_MSS,
             handshake_retries: 5,
-            handshake_timeout: TCP_HANDSHAKE_TIMEOUT,
+            handshake_timeout: Duration::from_secs(3),
             receive_window_size: 0xffff,
-            ack_delay_timeout: TCP_ACK_DELAY_TIMEOUT,
+            ack_delay_timeout: Duration::from_millis(5),
             window_scale: 0,
             rx_checksum_offload: false,
             tx_checksum_offload: false,

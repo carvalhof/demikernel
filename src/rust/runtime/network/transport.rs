@@ -5,13 +5,17 @@
 // Imports
 //======================================================================================================================
 
-use crate::runtime::{
-    fail::Fail,
-    memory::{
-        DemiBuffer,
-        MemoryRuntime,
+use crate::{
+    demi_sgarray_t,
+    runtime::{
+        fail::Fail,
+        memory::{
+            DemiBuffer,
+            MemoryRuntime,
+        },
+        scheduler::Yielder,
+        SharedDemiRuntime,
     },
-    SharedDemiRuntime,
 };
 use ::socket2::{
     Domain,
@@ -28,7 +32,7 @@ use ::std::{
 
 /// This trait represents a high-level network API that supports both connection-based and connection-less
 /// communication using sockets.
-pub trait NetworkTransport: Clone + 'static + MemoryRuntime {
+pub trait NetworkTransport: Clone + 'static {
     type SocketDescriptor: Debug;
 
     /// Create a socket using the network transport layer.
@@ -48,6 +52,7 @@ pub trait NetworkTransport: Clone + 'static + MemoryRuntime {
     fn accept(
         &mut self,
         sd: &mut Self::SocketDescriptor,
+        yielder: Yielder,
     ) -> impl std::future::Future<Output = Result<(Self::SocketDescriptor, SocketAddr), Fail>>;
 
     /// Asynchronously connect this socket to [remote].
@@ -55,14 +60,16 @@ pub trait NetworkTransport: Clone + 'static + MemoryRuntime {
         &mut self,
         sd: &mut Self::SocketDescriptor,
         remote: SocketAddr,
+        yielder: Yielder,
     ) -> impl std::future::Future<Output = Result<(), Fail>>;
 
     /// Push data to a connected socket.
     fn push(
         &mut self,
         sd: &mut Self::SocketDescriptor,
-        buf: &mut DemiBuffer,
+        buf: DemiBuffer,
         addr: Option<SocketAddr>,
+        yielder: Yielder,
     ) -> impl std::future::Future<Output = Result<(), Fail>>;
 
     /// Pop data from a connected socket.
@@ -70,11 +77,34 @@ pub trait NetworkTransport: Clone + 'static + MemoryRuntime {
         &mut self,
         sd: &mut Self::SocketDescriptor,
         size: usize,
+        yielder: Yielder,
     ) -> impl std::future::Future<Output = Result<(Option<SocketAddr>, DemiBuffer), Fail>>;
 
     /// Asynchronously close a socket.
-    fn close(&mut self, sd: &mut Self::SocketDescriptor) -> impl std::future::Future<Output = Result<(), Fail>>;
+    fn close(
+        &mut self,
+        sd: &mut Self::SocketDescriptor,
+        yielder: Yielder,
+    ) -> impl std::future::Future<Output = Result<(), Fail>>;
 
     /// Pull the common runtime out of the transport. We only need this because traits do not support members.
     fn get_runtime(&self) -> &SharedDemiRuntime;
+}
+
+impl<N: NetworkTransport> MemoryRuntime for N {
+    fn clone_sgarray(&self, sga: &demi_sgarray_t) -> Result<DemiBuffer, Fail> {
+        self.get_runtime().clone_sgarray(sga)
+    }
+
+    fn into_sgarray(&self, buf: DemiBuffer) -> Result<demi_sgarray_t, Fail> {
+        self.get_runtime().into_sgarray(buf)
+    }
+
+    fn sgaalloc(&self, size: usize) -> Result<demi_sgarray_t, Fail> {
+        self.get_runtime().sgaalloc(size)
+    }
+
+    fn sgafree(&self, sga: demi_sgarray_t) -> Result<(), Fail> {
+        self.get_runtime().sgafree(sga)
+    }
 }

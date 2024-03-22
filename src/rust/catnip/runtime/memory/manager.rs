@@ -127,7 +127,12 @@ impl MemoryManager {
         let mbuf_ptr: *mut rte_mbuf = self.body_pool.alloc_mbuf(None)?;
         Ok(unsafe { DemiBuffer::from_mbuf(mbuf_ptr) })
     }
-
+    
+    pub fn alloc_mbuf(&self, len: usize) -> Result<DemiBuffer, Fail> {
+        let mbuf_ptr: *mut rte_mbuf = self.body_pool.alloc_mbuf(Some(len))?;
+        Ok(unsafe { DemiBuffer::from_mbuf(mbuf_ptr) })
+    }
+    
     /// Allocates a scatter-gather array.
     pub fn alloc_sgarray(&self, size: usize) -> Result<demi_sgarray_t, Fail> {
         // TODO: Allocate an array of buffers if requested size is too large for a single buffer.

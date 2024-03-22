@@ -6,12 +6,13 @@
 //======================================================================================================================
 
 use crate::{
-    collections::async_queue::{
-        AsyncQueue,
-        SharedAsyncQueue,
+    collections::{
+        dpdk_spinlock::DPDKSpinLock,
+        async_queue::{
+            AsyncQueue,
+            SharedAsyncQueue,
+        },
     },
-    expect_ok,
-    expect_some,
     inetstack::protocols::{
         arp::SharedArpPeer,
         ethernet2::{
@@ -37,13 +38,16 @@ use crate::{
         },
     },
     runtime::{
-        conditional_yield_with_timeout,
         fail::Fail,
         memory::DemiBuffer,
         network::{
             config::TcpConfig,
             types::MacAddress,
             NetworkRuntime,
+        },
+        scheduler::{
+            Yielder,
+            YielderHandle,
         },
         QDesc,
         SharedDemiRuntime,
@@ -53,6 +57,8 @@ use crate::{
 };
 use ::futures::{
     channel::mpsc,
+    pin_mut,
+    select_biased,
     FutureExt,
 };
 use ::libc::{
@@ -87,8 +93,9 @@ pub struct PassiveSocket<N: NetworkRuntime> {
     local_link_addr: MacAddress,
     arp: SharedArpPeer<N>,
     dead_socket_tx: mpsc::UnboundedSender<QDesc>,
-
+    yielder_handle: YielderHandle,
     background_task_qt: Option<QToken>,
+    pub lock: *mut DPDKSpinLock,
 }
 
 #[derive(Clone)]
@@ -111,6 +118,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         dead_socket_tx: mpsc::UnboundedSender<QDesc>,
         nonce: u32,
     ) -> Result<Self, Fail> {
+        let yielder: Yielder = Yielder::new();
         let mut me: Self = Self(SharedObject::<PassiveSocket<N>>::new(PassiveSocket {
             connections: HashMap::<SocketAddrV4, SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>>::new(),
             recv_queue,
@@ -124,12 +132,18 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             tcp_config,
             arp,
             dead_socket_tx,
+            yielder_handle: yielder.get_handle(),
             background_task_qt: None,
+            lock: Box::into_raw(Box::new(DPDKSpinLock::new())),
         }));
-        let qt: QToken =
-            runtime.insert_background_coroutine("passive_listening::poll", Box::pin(me.clone().poll().fuse()))?;
+        let qt: QToken = runtime
+            .insert_background_coroutine("passive_listening::poll", Box::pin(me.clone().poll(yielder).fuse()))?;
         me.background_task_qt = Some(qt);
         Ok(me)
+    }
+
+    pub fn get_recv_queue(&self) -> SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)> {
+        self.recv_queue.clone()
     }
 
     /// Returns the address that the socket is bound to.
@@ -138,16 +152,26 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
     }
 
     /// Accept a new connection by fetching one from the queue of requests, blocking if there are no new requests.
-    pub async fn do_accept(&mut self) -> Result<EstablishedSocket<N>, Fail> {
-        self.ready.pop(None).await?
+    pub async fn do_accept(&mut self, yielder: Yielder) -> Result<EstablishedSocket<N>, Fail> {
+        self.ready.pop(&yielder).await?
     }
 
-    async fn poll(mut self) {
+    async fn poll(mut self, yielder: Yielder) {
         loop {
-            let (ipv4_hdr, tcp_hdr, buf) = match self.recv_queue.pop(None).await {
-                Ok(result) => result,
-                Err(_) => break,
+            // It is safe to call lock here, because only the worker_id=0 issues this poll routine.
+            unsafe { (*self.lock).lock() };
+            let (ipv4_hdr, tcp_hdr, buf) = match self.recv_queue.try_pop() {
+                Some((ipv4_hdr, tcp_hdr, buf)) => (ipv4_hdr, tcp_hdr, buf),
+                None => {
+                    unsafe { (*self.lock).unlock() };
+                    match yielder.yield_once().await {
+                        Ok(()) => continue,
+                        Err(_) => panic!("ERROR on PassiveSocket::poll()"),
+                    }
+                }
             };
+            unsafe { (*self.lock).unlock() };
+
             let remote: SocketAddrV4 = SocketAddrV4::new(ipv4_hdr.get_src_addr(), tcp_hdr.src_port);
             if let Some(recv_queue) = self.connections.get_mut(&remote) {
                 // Packet is either for an inflight request or established connection.
@@ -202,12 +226,23 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         let remote_isn = tcp_hdr.seq_num;
 
         // Allocate a new coroutine to send the SYN+ACK and retry if necessary.
+        let yielder: Yielder = Yielder::new();
         let recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)> =
             SharedAsyncQueue::<(Ipv4Header, TcpHeader, DemiBuffer)>::default();
         let ack_queue: SharedAsyncQueue<usize> = SharedAsyncQueue::<usize>::default();
+        let lock: *mut DPDKSpinLock = Box::into_raw(Box::new(DPDKSpinLock::new()));
         let future = self
             .clone()
-            .send_syn_ack_and_wait_for_ack(remote, remote_isn, local_isn, tcp_hdr, recv_queue.clone(), ack_queue)
+            .send_syn_ack_and_wait_for_ack(
+                remote,
+                remote_isn,
+                local_isn,
+                tcp_hdr,
+                recv_queue.clone(),
+                ack_queue,
+                yielder,
+                lock,
+            )
             .fuse();
         match self
             .runtime
@@ -271,6 +306,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
                 tcp_hdr,
                 data: None,
                 tx_checksum_offload: self.tcp_config.get_rx_checksum_offload(),
+                body_size: 0,
             }
         };
 
@@ -287,6 +323,8 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         tcp_hdr: TcpHeader,
         recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
         ack_queue: SharedAsyncQueue<usize>,
+        yielder: Yielder,
+        lock: *mut DPDKSpinLock,
     ) {
         // Set up new inflight accept connection.
         let mut remote_window_scale = None;
@@ -316,38 +354,58 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             }
 
             // Start ack timer.
-
+            let timeout_yielder: Yielder = Yielder::new();
+            let timeout = self
+                .runtime
+                .get_timer()
+                .wait(handshake_timeout, &timeout_yielder)
+                .fuse();
             // Wait for ACK in response.
-            let ack = self.clone().wait_for_ack(
-                recv_queue.clone(),
-                ack_queue.clone(),
-                remote,
-                local_isn,
-                remote_isn,
-                tcp_hdr.window_size,
-                remote_window_scale,
-                mss,
-            );
+            let ack = self
+                .clone()
+                .wait_for_ack(
+                    recv_queue.clone(),
+                    ack_queue.clone(),
+                    remote,
+                    local_isn,
+                    remote_isn,
+                    tcp_hdr.window_size,
+                    remote_window_scale,
+                    mss,
+                    &yielder,
+                    lock,
+                )
+                .fuse();
+            // Pin futures.
+            pin_mut!(timeout);
+            pin_mut!(ack);
 
             // Either we get an ack or a timeout.
-            match conditional_yield_with_timeout(ack, handshake_timeout).await {
-                // Got an ack
-                Ok(result) => {
-                    self.ready.push(result);
-                    return;
-                },
-                Err(Fail { errno, cause: _ }) if errno == ETIMEDOUT => {
-                    if handshake_retries > 0 {
-                        handshake_retries = handshake_retries - 1;
-                        continue;
-                    } else {
-                        self.ready.push(Err(Fail::new(ETIMEDOUT, "handshake timeout")));
+            select_biased! {
+                r = ack => match r {
+                    // Got an ack
+                    Ok(socket) => {
+                        self.ready.push(Ok(socket));
+                        return;
+                    },
+                    Err(e) => {
+                        self.ready.push(Err(e));
                         return;
                     }
                 },
-                Err(e) => {
-                    self.ready.push(Err(e));
-                    return;
+                r = timeout => match r {
+                    Ok(()) if handshake_retries > 0  => {
+                        handshake_retries = handshake_retries - 1;
+                        continue;
+                    },
+                    Ok(()) => {
+                        self.ready.push(Err(Fail::new(ETIMEDOUT, "handshake timeout")));
+                        return;
+                    },
+                    Err(e) => {
+                        self.ready.push(Err(e));
+                        return;
+                    }
                 },
             }
         }
@@ -359,7 +417,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         remote_isn: SeqNumber,
         remote: SocketAddrV4,
     ) -> Result<(), Fail> {
-        let remote_link_addr = self.arp.query(remote.ip().clone()).await?;
+        let remote_link_addr = self.arp.query(remote.ip().clone(), &Yielder::new()).await?;
         let mut tcp_hdr = TcpHeader::new(self.local.port(), remote.port());
         tcp_hdr.syn = true;
         tcp_hdr.seq_num = local_isn;
@@ -381,6 +439,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             tcp_hdr,
             data: None,
             tx_checksum_offload: self.tcp_config.get_rx_checksum_offload(),
+            body_size: 0,
         };
         self.transport.transmit(Box::new(segment));
         Ok(())
@@ -396,8 +455,10 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         header_window_size: u16,
         remote_window_scale: Option<u8>,
         mss: usize,
+        yielder: &Yielder,
+        lock: *mut DPDKSpinLock,
     ) -> Result<EstablishedSocket<N>, Fail> {
-        let (ipv4_hdr, tcp_hdr, buf) = recv_queue.pop(None).await?;
+        let (ipv4_hdr, tcp_hdr, buf) = recv_queue.pop(&yielder).await?;
         debug!("Received ACK: {:?}", tcp_hdr);
 
         // Check the ack sequence number.
@@ -409,18 +470,14 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             Some(w) => (self.tcp_config.get_window_scale() as u32, w),
             None => (0, 0),
         };
-        let remote_window_size = expect_ok!(
-            expect_some!(
-                (header_window_size as u32).checked_shl(remote_window_scale as u32),
-                "TODO: Window size overflow"
-            )
-            .try_into(),
-            "TODO: Window size overflow"
-        );
-        let local_window_size = expect_some!(
-            (self.tcp_config.get_receive_window_size() as u32).checked_shl(local_window_scale as u32),
-            "TODO: Window size overflow"
-        );
+        let remote_window_size = (header_window_size as u32)
+            .checked_shl(remote_window_scale as u32)
+            .expect("TODO: Window size overflow")
+            .try_into()
+            .expect("TODO: Window size overflow");
+        let local_window_size = (self.tcp_config.get_receive_window_size() as u32)
+            .checked_shl(local_window_scale as u32)
+            .expect("TODO: Window size overflow");
         info!(
             "Window sizes: local {}, remote {}",
             local_window_size, remote_window_size
@@ -456,6 +513,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             congestion_control::None::new,
             None,
             self.dead_socket_tx.clone(),
+            lock,
         )?;
 
         Ok(new_socket)
@@ -477,5 +535,17 @@ impl<N: NetworkRuntime> Deref for SharedPassiveSocket<N> {
 impl<N: NetworkRuntime> DerefMut for SharedPassiveSocket<N> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
+    }
+}
+
+impl<N: NetworkRuntime> Drop for PassiveSocket<N> {
+    fn drop(&mut self) {
+        if let Some(qt) = self.background_task_qt.take() {
+            self.yielder_handle
+                .wake_with(Err(Fail::new(libc::ECANCELED, "Socket is closing")));
+            if let Err(e) = self.runtime.remove_background_coroutine(qt) {
+                warn!("Could not remove background coroutine: {:?}", e);
+            }
+        }
     }
 }
