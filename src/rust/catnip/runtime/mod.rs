@@ -166,7 +166,7 @@ impl SharedDPDKRuntime {
             None,
             None,
             Some(0xffff),
-            Some(10),
+            Some(0),
             None,
             Some(tcp_checksum_offload),
             Some(tcp_checksum_offload),

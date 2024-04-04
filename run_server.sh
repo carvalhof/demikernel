@@ -1,12 +1,9 @@
 #!/bin/bash
 
-## Perf
-USE_PERF=0
-
 LOCAL='192.168.100.1:12345'
 HOMEDIR='/home/fbc'
 
-if [ "$#" -ne 3 ]; then
+if [ "$#" -ne 4 ]; then
 	echo "Illegal number of parameters"
 	exit
 fi
@@ -14,6 +11,7 @@ fi
 SERVER_CPUS=$1
 SERVER_ARGS=$2
 TIMEOUT=$3
+USE_PERF=$4
 
 SERVER_LCORES=`echo ${SERVER_CPUS} | sed 's/,/:/g'`
 
@@ -30,7 +28,6 @@ if [ ${USE_PERF} -eq 1 ]; then
     echo 1 | sudo tee /proc/sys/kernel/nmi_watchdog
 else
     taskset -c ${SERVER_CPUS} sudo HOME=${HOMEDIR} LD_LIBRARY_PATH=$HOME/lib/x86_64-linux-gnu make test-system-rust LIBOS=catnip TEST=tcp-echo-multiflow ARGS="${ARGS}" TIMEOUT=$TIMEOUT
-    #taskset -c ${SERVER_CPUS} sudo HOME=${HOMEDIR} LD_LIBRARY_PATH=$HOME/lib/x86_64-linux-gnu make test-system-rust LIBOS=catnip TEST=tcp-echo-multiflow ARGS="${ARGS}" TIMEOUT=$TIMEOUT RUST_LOG=trace
 fi
 
 ## Example to run:

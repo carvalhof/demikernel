@@ -232,6 +232,7 @@ impl<N: NetworkRuntime> SharedActiveOpenSocket<N> {
             None,
             self.dead_socket_tx.clone(),
             std::ptr::null_mut(),
+            std::ptr::null_mut(),
         )?)
     }
 

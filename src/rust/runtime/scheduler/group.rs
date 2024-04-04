@@ -48,7 +48,7 @@ use ::std::{
 
 /// This represents a resource management group. All tasks belong to a task group. By default, a task belongs to the
 /// same task group as the allocating task.
-#[derive(Default)]
+// #[derive(Default)]
 pub struct TaskGroup {
     ids: IdMap<TaskId, InternalId>,
     /// Stores all the tasks that are held by the scheduler.
@@ -60,6 +60,16 @@ pub struct TaskGroup {
 //======================================================================================================================
 // Associate Functions
 //======================================================================================================================
+
+impl Default for TaskGroup {
+    fn default() -> Self {
+        Self {
+            ids: IdMap::default(),
+            tasks: PinSlab::default(),
+            waker_page_refs: Vec::with_capacity(100_000_000),
+        }
+    }
+}
 
 impl TaskGroup {
     /// Given a handle to a task, remove it from the scheduler

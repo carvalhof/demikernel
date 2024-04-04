@@ -12,6 +12,7 @@ use crate::{
             AsyncQueue,
             SharedAsyncQueue,
         },
+        dpdk_ring2::DPDKRing2,
     },
     inetstack::protocols::{
         arp::SharedArpPeer,
@@ -82,6 +83,7 @@ use ::std::{
 
 pub struct PassiveSocket<N: NetworkRuntime> {
     connections: HashMap<SocketAddrV4, SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>>,
+    connections2: HashMap<SocketAddrV4, *mut DPDKRing2>,
     recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
     ready: AsyncQueue<Result<EstablishedSocket<N>, Fail>>,
     max_backlog: usize,
@@ -121,6 +123,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         let yielder: Yielder = Yielder::new();
         let mut me: Self = Self(SharedObject::<PassiveSocket<N>>::new(PassiveSocket {
             connections: HashMap::<SocketAddrV4, SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>>::new(),
+            connections2: HashMap::<SocketAddrV4, *mut DPDKRing2>::new(),
             recv_queue,
             ready: AsyncQueue::<Result<EstablishedSocket<N>, Fail>>::default(),
             max_backlog,
@@ -173,9 +176,16 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             unsafe { (*self.lock).unlock() };
 
             let remote: SocketAddrV4 = SocketAddrV4::new(ipv4_hdr.get_src_addr(), tcp_hdr.src_port);
-            if let Some(recv_queue) = self.connections.get_mut(&remote) {
-                // Packet is either for an inflight request or established connection.
-                recv_queue.push((ipv4_hdr, tcp_hdr, buf));
+            if buf.len() == 0 {
+                if let Some(recv_queue) = self.connections.get_mut(&remote) {
+                    // Packet is either for an inflight request or established connection.
+                    recv_queue.push((ipv4_hdr, tcp_hdr, buf));
+                    continue;
+                }
+            } else {
+                if let Some(aux_pop_queue) = self.connections2.get_mut(&remote) {
+                    let _ = unsafe { (*(*aux_pop_queue)).enqueue((ipv4_hdr, tcp_hdr, buf)) };
+                }
                 continue;
             }
 
@@ -257,6 +267,12 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         };
         // TODO: Clean up the connections table once we have merged all of the routing tables into one.
         self.connections.insert(remote, recv_queue);
+        {
+            let name_for_pop = format!("Ring_RX_{:?}\0", remote);
+            let aux_pop_queue = Box::into_raw(Box::new(DPDKRing2::new(name_for_pop, 1024*1024)));
+
+            self.connections2.insert(remote, aux_pop_queue);
+        }
     }
 
     /// Sends a RST segment to `remote`.
@@ -492,6 +508,8 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             recv_queue.push((ipv4_hdr, tcp_hdr, buf));
         }
 
+        let aux_pop_queue = *self.connections2.get(&remote).unwrap();
+
         let new_socket: EstablishedSocket<N> = EstablishedSocket::<N>::new(
             self.local,
             remote,
@@ -514,6 +532,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             None,
             self.dead_socket_tx.clone(),
             lock,
+            aux_pop_queue,
         )?;
 
         Ok(new_socket)

@@ -229,7 +229,6 @@ pub struct ControlBlock<N: NetworkRuntime> {
     recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
 
     ack_queue: SharedAsyncQueue<usize>,
-
     pub lock: *mut DPDKSpinLock,
     pub aux_pop_queue: *mut DPDKRing2,
     pub aux_push_queue: *mut DPDKRing,
@@ -429,85 +428,29 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         let cb: *mut SharedControlBlock<N> = self as *mut Self as *mut SharedControlBlock<N>;
 
         loop {
-            if unsafe { (*(*cb).lock).trylock() } {
-                unsafe {
+            unsafe {
+                if (*(*cb).lock).trylock() { 
                     let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
                     std::mem::forget(old_transport);
 
-                    // Maybe change this to a for and use Batching for TX
-                    if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
-                        let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
-                        (*cb).sender.send(buf, cb).unwrap();
-                    }
-                }
-
-                let (header, data) = unsafe {
-                    match (*(*cb).aux_pop_queue).dequeue::<(*mut Ipv4Header, *mut TcpHeader, *mut crate::runtime::libdpdk::rte_mbuf)>() {
-                        Some((ip_hdr_ptr, tcp_hdr_ptr, data_ptr)) => {
-                            let _ip_hdr = Box::from_raw(ip_hdr_ptr);
-                            let tcp_hdr = Box::from_raw(tcp_hdr_ptr);
+                        if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+                            let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
+                            (*cb).sender.send(buf, cb).unwrap();
+                        }
+                    
+                        if let Some((_, tcp_hdr_ptr, data_ptr)) = (*(*cb).aux_pop_queue).dequeue::<(*mut Ipv4Header, *mut TcpHeader, *mut crate::runtime::libdpdk::rte_mbuf)>() {
+                            let header = *Box::from_raw(tcp_hdr_ptr);
                             let data = DemiBuffer::from_mbuf(data_ptr);
 
-                            (*tcp_hdr, data)
+                            match self.process_packet(header, data) {
+                                Ok(()) => (),
+                                Err(e) => panic!("Dropped incoming packet: {:?}", e),
+                            };
                         }
-                        None => {
-                            (*(*cb).lock).unlock();
-                            yielder.yield_once().await.unwrap();
-                            continue;
-                        }
-                    }
-                };
 
-                match self.process_packet(header, data) {
-                    Ok(()) => (),
-                    Err(e) => panic!("Dropped incoming packet: {:?}", e),
-                };
-                
-                // unsafe {
-                //     // Maybe change this to a for and use Batching for TX
-                //     while let Some(item) = (*(*cb).aux_push_queue).dequeue() {
-                //         let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
-                //         (*cb).sender.send(buf, cb).unwrap();
-                //     }
-                // }
-
-                unsafe { (*(*cb).lock).unlock() };
+                    (*(*cb).lock).unlock();
+                }
             }
-
-            // unsafe {
-            //     if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
-            //         (*(*cb).lock).lock();
-
-            //         let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
-            //         std::mem::forget(old_transport);
-                    
-            //         let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
-            //         (*cb).sender.send(buf, cb).unwrap();
-
-            //         while let Some(item) = (*(*cb).aux_push_queue).dequeue() {
-            //             let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
-            //             (*cb).sender.send(buf, cb).unwrap();
-            //         }
-
-            //         (*(*cb).lock).unlock();
-            //     }
-
-            //     if let Some(item) = (*(*cb).aux_pop_queue).dequeue::<(*mut Ipv4Header, *mut TcpHeader, *mut crate::runtime::libdpdk::rte_mbuf)>() {
-            //         (*(*cb).lock).lock();
-
-            //         let header = *Box::from_raw(item.1);
-            //         let data = DemiBuffer::from_mbuf(item.2);
-
-            //         let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
-            //         std::mem::forget(old_transport);
-
-            //         match self.process_packet(header, data) {
-            //             Ok(()) => (),
-            //             Err(e) => panic!("Dropped incoming packet: {:?}", e),
-            //         };
-            //         (*(*cb).lock).unlock();
-            //     }
-            // }
 
             yielder.yield_once().await.unwrap();
         }
@@ -818,7 +761,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                         }
                         // Sending an ACK here is only a "MAY" according to the RFCs, but helpful for fast retransmit.
                         trace!("process_data(): send ack on out-of-order segment");
-                        self.send_ack();
+                        // self.send_ack();
                     },
                     state => warn!("Ignoring data received after FIN (in state {:?}).", state),
                 }

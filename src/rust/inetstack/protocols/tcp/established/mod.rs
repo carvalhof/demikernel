@@ -85,9 +85,9 @@ impl<N: NetworkRuntime> EstablishedSocket<N> {
         congestion_control_options: Option<congestion_control::Options>,
         _dead_socket_tx: mpsc::UnboundedSender<QDesc>,
         lock: *mut DPDKSpinLock,
+        aux_pop_queue: *mut DPDKRing2,
     ) -> Result<Self, Fail> {
         // TODO: Maybe add the queue descriptor here.
-        let name_for_pop = format!("Ring_RX_{:?}\0", remote);
         let name_for_push = format!("Ring_TX_{:?}\0", remote);
         let cb = Box::into_raw(Box::new(SharedControlBlock::new(
             local,
@@ -110,7 +110,7 @@ impl<N: NetworkRuntime> EstablishedSocket<N> {
             recv_queue.clone(),
             ack_queue.clone(),
             lock,
-            Box::into_raw(Box::new(DPDKRing2::new(name_for_pop, 1024*1024))),
+            aux_pop_queue,
             Box::into_raw(Box::new(DPDKRing::new(name_for_push, 1024*1024))),
         )));
         Ok(Self {

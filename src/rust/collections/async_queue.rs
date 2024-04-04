@@ -137,10 +137,8 @@ impl<T> SharedAsyncQueue<T> {
 impl<T> Default for AsyncQueue<T> {
     fn default() -> Self {
         Self {
-            // queue: VecDeque::<T>::new(),
-            queue: VecDeque::<T>::with_capacity(100000000),
-            // waiters: Vec::<YielderHandle>::new(),
-            waiters: Vec::<YielderHandle>::with_capacity(100000000),
+            queue: VecDeque::<T>::with_capacity(100_000_000),
+            waiters: Vec::<YielderHandle>::with_capacity(100_000_000),
         }
     }
 }

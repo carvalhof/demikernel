@@ -304,8 +304,8 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     }
 
     let mut nr_pending: u64 = 0;
-    let mut qtokens: Vec<QToken> = Vec::with_capacity(1000000);
-    let mut output: Vec<demi_qresult_t> = Vec::with_capacity(1000000);
+    let mut qtokens: Vec<QToken> = Vec::with_capacity(100_000_000);
+    let mut output: Vec<demi_qresult_t> = Vec::with_capacity(100_000_000);
 
     // Releasing the lock
     log::trace!("Worker {:?}: releasing the lock", worker_id);
