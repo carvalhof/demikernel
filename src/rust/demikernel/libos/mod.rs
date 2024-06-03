@@ -102,6 +102,40 @@ pub enum LibOS {
 
 /// Associated functions for LibOS.
 impl LibOS {
+    /// Initializes the Catnip LibOS
+    #[cfg(feature = "catnip-libos")]
+    pub fn init(rx_queues: u16, tx_queues: u16) -> Result<(), Fail> {
+        logging::initialize();
+        crate::runtime::libdpdk::load_mlx_driver();
+
+        // Read in configuration file.
+        let config_path: String = match std::env::var("CONFIG_PATH") {
+            Ok(config_path) => config_path,
+            Err(_) => {
+                return Err(Fail::new(
+                    libc::EINVAL,
+                    "missing value for CONFIG_PATH environment variable",
+                ))
+            }
+        };
+
+        let config: Config = Config::new(config_path)?;
+
+        // Initialize the SharedDPDKRuntime.
+        let (memory_manager, port_id, _link_addr) = SharedDPDKRuntime::initialize_dpdk(&config)?;
+
+        // Initialize the DPDK port and queues.
+        SharedDPDKRuntime::initialize_dpdk_port(
+            port_id,
+            memory_manager,
+            rx_queues,
+            tx_queues,
+            &config,
+        )?;
+
+        Ok(())
+    }
+    
     /// Instantiates a new LibOS.
     pub fn new(libos_name: LibOSName, _perf_callback: Option<demi_callback_t>) -> Result<Self, Fail> {
         timer!("demikernel::new");
