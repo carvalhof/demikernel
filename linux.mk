@@ -59,7 +59,7 @@ export LIBS := $(BUILD_DIR)/$(DEMIKERNEL_LIB)
 # Build Parameters
 #=======================================================================================================================
 
-export LIBOS ?= catnap
+export LIBOS ?= catnip
 export CARGO_FEATURES := --features=$(LIBOS)-libos --no-default-features
 
 # Switch for DPDK
@@ -78,7 +78,7 @@ CARGO_FEATURES += $(FEATURES)
 
 #=======================================================================================================================
 
-all: init | all-libs all-tests all-examples
+all: init | all-libs all-examples
 
 init:
 	mkdir -p $(LIBDIR)
