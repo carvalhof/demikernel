@@ -321,6 +321,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
                 ipv4_hdr: Ipv4Header::new(self.local.ip().clone(), remote.ip().clone(), IpProtocol::TCP),
                 tcp_hdr,
                 data: None,
+                body_size: 0,
                 tx_checksum_offload: self.tcp_config.get_rx_checksum_offload(),
             }
         };
@@ -431,6 +432,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             ipv4_hdr: Ipv4Header::new(self.local.ip().clone(), remote.ip().clone(), IpProtocol::TCP),
             tcp_hdr,
             data: None,
+            body_size: 0,
             tx_checksum_offload: self.tcp_config.get_rx_checksum_offload(),
         };
         self.transport.transmit(Box::new(segment));
