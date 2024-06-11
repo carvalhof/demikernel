@@ -250,7 +250,7 @@ impl Sender {
                 }
             }
         }
-
+panic!("e");
         // Too fast.
         // TODO: We need to fix this the correct way: limit our send buffer size to the amount we're willing to buffer.
         if self.unsent_queue.borrow().len() > UNSENT_QUEUE_CUTOFF {

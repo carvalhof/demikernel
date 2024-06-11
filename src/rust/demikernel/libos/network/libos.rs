@@ -84,6 +84,8 @@ pub struct NetworkLibOS<T: NetworkTransport> {
     runtime: SharedDemiRuntime,
     /// Underlying network transport.
     transport: T,
+    ///
+    local_output: Vec<(usize, QDesc, QToken, OperationResult)>,
 }
 
 #[derive(Clone)]
@@ -101,6 +103,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             local_ipv4_addr,
             runtime: runtime.clone(),
             transport,
+            local_output: Vec::<(usize, QDesc, QToken, OperationResult)>::with_capacity(4*1024),
         }))
     }
 
@@ -532,6 +535,27 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
         let (offset, qr): (usize, demi_qresult_t) = self.wait_any(&qt_array, timeout)?;
         debug_assert_eq!(offset, 0);
         Ok(qr)
+    }
+
+    pub fn try_wait_any(&mut self, qts: &[QToken], _output: &mut Vec<(usize, demi_qresult_t)>) -> Vec<(usize, demi_qresult_t)> {
+        // self.local_output.clear();
+        let mut local_output = self.local_output.clone();
+
+        // self.runtime.try_wait_any(qts, &mut local_output);
+        // for (offset, qd, qt, result) in &local_output {
+        //     let qr: demi_qresult_t = self.create_result(result.clone(), *qd, *qt);
+        //     output.push((*offset, qr));
+        // }
+
+        let mut output = Vec::<(usize, demi_qresult_t)>::new();
+        let results = self.runtime.try_wait_any(qts, &mut local_output);
+
+        for (offset, qd, qt, result) in results {
+            let qr: demi_qresult_t = self.create_result(result, qd, qt);
+            output.push((offset, qr));
+        }
+
+        output
     }
 
     /// Waits for any of the given pending I/O operations to complete or a timeout to expire.

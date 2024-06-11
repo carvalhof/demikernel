@@ -711,4 +711,17 @@ impl LibOS {
             LibOS::MemoryLibOS(libos) => libos.poll(),
         }
     }
+
+    pub fn try_wait_any(&mut self, qts: &[QToken], output: &mut Vec<(usize, demi_qresult_t)>) -> Vec<(usize, demi_qresult_t)> {
+        timer!("demikernel::try_wait_any");
+        match self {
+            #[cfg(any(
+                feature = "catnap-libos",
+                feature = "catnip-libos",
+                feature = "catpowder-libos",
+                feature = "catloop-libos"
+            ))]
+            LibOS::NetworkLibOS(libos) => libos.try_wait_any(qts, output),
+        }
+    }
 }

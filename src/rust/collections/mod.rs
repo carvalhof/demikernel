@@ -16,4 +16,5 @@ cfg_if! {
     }
 }
 
+pub mod dpdk_ring;
 pub mod dpdk_spinlock;

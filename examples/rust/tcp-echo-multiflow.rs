@@ -15,7 +15,10 @@ use ::demikernel::{
     LibOS,
     LibOSName,
     demi_sgarray_t,
-    collections::dpdk_spinlock::DPDKSpinLock,
+    collections::{
+        dpdk_ring::DPDKRing,
+        dpdk_spinlock::DPDKSpinLock,
+    },
     runtime::libdpdk::{
         rte_lcore_count,
         rte_get_timer_hz,
@@ -36,6 +39,7 @@ use ::demikernel::{
         rte_flow_action_type_RTE_FLOW_ACTION_TYPE_END,
         rte_flow_action_type_RTE_FLOW_ACTION_TYPE_QUEUE,
     },
+    runtime::types::demi_qresult_t,
 };
 use ::rand::{
     Rng,
@@ -73,6 +77,7 @@ use ::demikernel::perftools::profiler;
 //==============================================================================
 
 const REQUEST_SIZE: usize = 64;
+const RING_SIZE: u32 = 4*1024;
 
 //======================================================================================================================
 // Flow affinity (DPDK)
@@ -287,9 +292,17 @@ impl FakeWorker {
 }
 
 struct WorkerArg {
-    worker_id: u16,
-    addr: SocketAddr,
+    worker_id: usize,
     spec: Arc<String>,
+    spinlock: *mut DPDKSpinLock,
+    ring_to_worker: *mut DPDKRing,
+    ring_from_worker: *mut DPDKRing,
+}
+
+struct DispatcherArg {
+    addr: SocketAddr,
+    ring_to_worker: *mut DPDKRing,
+    ring_from_worker: *mut DPDKRing,
     spinlock: *mut DPDKSpinLock,
 }
 
@@ -307,17 +320,56 @@ extern "C" fn worker_wrapper(data: *mut std::os::raw::c_void) -> i32 {
 }
 
 fn worker_fn(args: &mut WorkerArg) -> ! {
+    let worker_id: usize = args.worker_id;
+    let ring_to_worker: *mut DPDKRing = args.ring_to_worker;
+    let ring_from_worker: *mut DPDKRing = args.ring_from_worker;
+
+    // Create the FakeWorker
+    let fakework: FakeWorker = FakeWorker::create(args.spec.as_str()).unwrap();
+
+    // Releasing the lock
+    unsafe { (*args.spinlock).unlock(); }
+
+    loop {
+        if let Some((qd, sga)) = unsafe { (*ring_to_worker).dequeue::<(QDesc, demi_sgarray_t)>() } {
+            let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
+            unsafe {
+                let iterations: u64 = *((ptr.offset(32)) as *mut u64);
+                let randomness: u64 = *((ptr.offset(40)) as *mut u64);
+                *((ptr.offset(24)) as *mut u64) = worker_id as u64;
+                fakework.work(iterations, randomness);
+            }
+
+            if let Err(e) = unsafe { (*ring_from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga)) } {
+                panic!("Error: {:}", e);
+            }
+        }
+    }
+}
+
+//======================================================================================================================
+// Dispatcher
+//======================================================================================================================
+
+extern "C" fn dispatcher_wrapper(data: *mut std::os::raw::c_void) -> i32 {
+    let args: &mut DispatcherArg = unsafe { &mut *(data as *mut DispatcherArg) };
+
+    dispatcher_fn(args);
+
+    #[allow(unreachable_code)]
+    0
+}
+
+fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
     let addr: SocketAddr = args.addr;
-    let worker_id: u16 = args.worker_id;
+    let ring_to_worker: *mut DPDKRing = args.ring_to_worker;
+    let ring_from_worker: *mut DPDKRing = args.ring_from_worker;
 
     // Create the LibOS
     let mut libos: LibOS = match LibOS::new(LibOSName::Catnip) {
         Ok(libos) => libos,
         Err(e) => panic!("failed to initialize libos: {:?}", e),
     };
-
-    // Create the FakeWorker
-    let fakework: FakeWorker = FakeWorker::create(args.spec.as_str()).unwrap();
 
     // Setup peer.
     let sockqd: QDesc = match libos.socket(AF_INET, SOCK_STREAM, 0) {
@@ -340,8 +392,9 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     // Releasing the lock.
     unsafe { (*args.spinlock).unlock(); }
 
-    let timeout: Option<Duration> = None;
+    let timeout: Option<Duration> = Some(Duration::ZERO);
     let mut qts: Vec<QToken> = Vec::with_capacity(1024);
+    let mut output: Vec<(usize, demi_qresult_t)> = Vec::with_capacity(1024);
 
     // Accept incoming connection.
     if let Ok(qt) = libos.accept(sockqd) {
@@ -349,7 +402,21 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     }
 
     loop {
-        // Wait for some event.
+        // Receive the reply from worker.
+        if let Some((qd, sga)) = unsafe { (*ring_from_worker).dequeue::<(QDesc, demi_sgarray_t)>() } {
+            // Push the reply.
+            if let Ok(qt) = libos.push(qd, &sga) {
+                qts.push(qt);
+            }
+        }
+
+        // Try to wait for some event.
+        // output.clear();
+        // libos.try_wait_any(&qts, &mut output);
+        // for (idx, qr) in &output {
+        
+        // let results = libos.try_wait_any(&qts, &mut output);
+
         if let Ok ((idx, qr)) = libos.wait_any(&qts, timeout) {
             // Remove the qtoken.
             qts.remove(idx);
@@ -377,20 +444,12 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                 }
                 demikernel::runtime::types::demi_opcode_t::DEMI_OPC_POP => {
                     // Process the request.
+                    let qd: QDesc = qr.qr_qd.into();
                     let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
 
-                    let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                    unsafe {
-                        let iterations: u64 = *((ptr.offset(32)) as *mut u64);
-                        let randomness: u64 = *((ptr.offset(40)) as *mut u64);
-                        *((ptr.offset(24)) as *mut u64) = worker_id as u64;
-                        fakework.work(iterations, randomness);
-                    }
-
-                    // Push the reply.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.push(qd, &sga) {
-                        qts.push(qt);
+                    // Send the request to worker.
+                    if let Err(e) = unsafe { (*ring_to_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga)) } {
+                        panic!("Error: {:?}", e);
                     }
                     
                 }
@@ -478,8 +537,8 @@ pub fn main() -> Result<()> {
 
             // Initialize DPDK EAL.
             {
-                let rx_queues: u16 = nr_workers as u16;
-                let tx_queues: u16 = nr_workers as u16;
+                let rx_queues: u16 = 1 as u16;
+                let tx_queues: u16 = 1 as u16;
                 match LibOS::init(rx_queues, tx_queues) {
                     Ok(()) => (),
                     Err(e) => anyhow::bail!("{:?}", e),
@@ -488,22 +547,47 @@ pub fn main() -> Result<()> {
             
             // Ensure the number of lcores.
             unsafe {
-                if rte_lcore_count() < ((nr_workers + 1) as u32) || list_of_cores.len() < (nr_workers + 1) as usize {
+                if rte_lcore_count() < ((nr_workers + 1 + 1) as u32) || list_of_cores.len() < (nr_workers + 1 + 1) as usize {
                     panic!("The number of DPDK lcores should be at least {:?}", nr_workers + 1);
                 }
             }
 
             // Install flow rules to steer the incoming packets.
-            flow_affinity(nr_workers);
+            flow_affinity(1);
 
             let mut lcore_idx: usize = 1;
             let spinlock: *mut DPDKSpinLock = Box::into_raw(Box::new(DPDKSpinLock::new()));
 
+            // Creating the RX and TX queues.
+            let ring_to_worker: String = format!("ring_to_worker");
+            let ring_from_worker: String = format!("ring_from_worker");
+
+            let ring_to_worker = Box::into_raw(Box::new(DPDKRing::new(ring_to_worker, RING_SIZE)));
+            let ring_from_worker = Box::into_raw(Box::new(DPDKRing::new(ring_from_worker, RING_SIZE)));
+
+            // Creating the dispatcher.
+            let mut arg: DispatcherArg = DispatcherArg {
+                addr,
+                ring_to_worker,
+                ring_from_worker,
+                spinlock,
+            };
+
+            let lcore: u32 = u32::from_str(list_of_cores[lcore_idx])?;
+            lcore_idx += 1;
+            unsafe { (*spinlock).set() };
+            let arg_ptr: *mut std::os::raw::c_void = &mut arg as *mut _ as *mut std::os::raw::c_void;
+            unsafe { rte_eal_remote_launch(Some(dispatcher_wrapper), arg_ptr, lcore) };
+
+            unsafe { (*spinlock).lock() };
+
+            // Creating the workers.
             for worker_id in 0..nr_workers {
                 let mut arg: WorkerArg = WorkerArg {
-                    addr,
-                    worker_id: worker_id as u16,
+                    worker_id: worker_id,
                     spec: Arc::clone(&spec),
+                    ring_to_worker,
+                    ring_from_worker,
                     spinlock,
                 };
 

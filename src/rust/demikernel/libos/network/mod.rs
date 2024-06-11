@@ -349,4 +349,11 @@ impl NetworkLibOSWrapper {
             NetworkLibOSWrapper::Catloop(libos) => libos.sgafree(sga),
         }
     }
+
+    pub fn try_wait_any(&mut self, qts: &[QToken], output: &mut Vec<(usize, demi_qresult_t)>) -> Vec<(usize, demi_qresult_t)> {
+        match self {
+            #[cfg(feature = "catnip-libos")]
+            NetworkLibOSWrapper::Catnip(libos) => libos.try_wait_any(qts, output),
+        }
+    }
 }

@@ -246,6 +246,26 @@ impl SharedDemiRuntime {
         }
     }
 
+    pub fn try_wait_any(&mut self, qts: &[QToken], _output: &mut Vec<(usize, QDesc, QToken, OperationResult)>) -> Vec<(usize, QDesc, QToken, OperationResult)>{
+        let mut output = Vec::<(usize, QDesc, QToken, OperationResult)>::new();
+
+        for (i, qt) in qts.iter().enumerate() {
+            if let Some((qd, result)) = self.get_completed_task(qt) {
+                log::error!("completed");
+                output.push((i, qd, *qt, result));
+            }
+        }
+
+        self.advance_clock_to_now();
+
+        if let Some((i, qd, result)) = self.run_any(qts, Duration::from_nanos(1)) {
+            // return Ok((i, qts[i], qd, result));
+            output.push((i, qd, qts[i], result));
+        }
+
+        output
+    }
+
     /// Waits until one of the tasks in qts has completed and returns the result.
     pub fn wait_any(
         &mut self,
