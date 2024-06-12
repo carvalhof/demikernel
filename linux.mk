@@ -151,7 +151,7 @@ clean-tests-c:
 #=======================================================================================================================
 
 # Builds all examples.
-all-examples: all-examples-c all-examples-rust
+all-examples: all-examples-rust
 
 # Builds all C examples.
 all-examples-c: all-libs
