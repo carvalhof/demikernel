@@ -187,8 +187,8 @@ impl SharedDPDKRuntime {
         tx_queues: u16,
         config: &Config,
     ) -> Result<(), Fail> {
-        let rx_ring_size: u16 = 2048;
-        let tx_ring_size: u16 = 2048;
+        let rx_ring_size: u16 = 256;
+        let tx_ring_size: u16 = 256;
 
         let dev_info: dpdk_rs::rte_eth_dev_info = unsafe {
             let mut d: MaybeUninit<dpdk_rs::rte_eth_dev_info> = MaybeUninit::zeroed();
