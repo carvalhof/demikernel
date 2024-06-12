@@ -34,7 +34,7 @@ use arraydeque::{
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 // The queue size.
-const DEFAULT_QUEUE_SIZE: usize = 1024;
+const DEFAULT_QUEUE_SIZE: usize = 4096;
 
 //======================================================================================================================
 // Structures
