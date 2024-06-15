@@ -317,7 +317,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     };
 
     // Create the FakeWorker
-    let mut fakework: FakeWorker = FakeWorker::create(args.spec.as_str()).unwrap();
+    let fakework: FakeWorker = FakeWorker::create(args.spec.as_str()).unwrap();
     fakework.warmup_cache();
 
     // Setup peer.
