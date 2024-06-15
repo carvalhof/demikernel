@@ -43,17 +43,12 @@ use crate::{
         },
     },
     runtime::{
-        fail::Fail,
-        memory::DemiBuffer,
-        network::{
+        fail::Fail, memory::DemiBuffer, network::{
             config::TcpConfig,
             socket::option::TcpSocketOptions,
             types::MacAddress,
             NetworkRuntime,
-        },
-        yield_with_timeout,
-        SharedDemiRuntime,
-        SharedObject,
+        }, poll_yield, yield_with_timeout, SharedDemiRuntime, SharedObject
     },
 };
 use ::std::{
@@ -423,9 +418,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
     pub async fn poll(&mut self) -> Result<Never, Fail> {
         // Normal data processing in the Established state.
         loop {
-            let (header, data): (TcpHeader, DemiBuffer) = match self.recv_queue.pop(None).await {
-                Ok((_, header, data)) if self.state == State::Established => (header, data),
-                Ok(result) => {
+            let (header, data): (TcpHeader, DemiBuffer) = match self.recv_queue.try_pop() {
+                Some((_, header, data)) if self.state == State::Established => (header, data),
+                Some(result) => {
                     self.recv_queue.push_front(result);
                     let cause: String = format!(
                         "ending receive polling loop for non-established connection (local={:?}, remote={:?})",
@@ -434,13 +429,15 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                     error!("poll(): {}", cause);
                     return Err(Fail::new(libc::ECANCELED, &cause));
                 },
-                Err(e) => {
+                None => {
                     let cause: String = format!(
                         "ending receive polling loop for active connection (local={:?}, remote={:?})",
                         self.local, self.remote
                     );
-                    warn!("poll(): {:?} ({:?})", cause, e);
-                    return Err(e);
+                    warn!("poll(): {:?} ", cause);
+                    // return Err(e);
+                    poll_yield().await;
+                    continue;
                 },
             };
 
@@ -467,6 +464,8 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                 },
                 Err(e) => debug!("Dropped packet: {:?}", e),
             }
+
+            poll_yield().await;
         }
     }
 
