@@ -11,6 +11,7 @@ use crate::{
             AsyncQueue,
             SharedAsyncQueue,
         },
+        dpdk_ring2::DPDKRing2,
         async_value::SharedAsyncValue,
     },
     expect_some,
@@ -503,6 +504,8 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             recv_queue.push((ipv4_hdr, tcp_hdr, buf));
         }
 
+        let name_for_pop = format!("Ring_RX_{:?}\0", remote);
+
         let new_socket: EstablishedSocket<N> = EstablishedSocket::<N>::new(
             self.local,
             remote,
@@ -526,6 +529,8 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             None,
             self.dead_socket_tx.clone(),
             Some(self.socket_queue.clone()),
+            Box::into_raw(Box::new(crate::collections::dpdk_spinlock::DPDKSpinLock::new())),
+            Box::into_raw(Box::new(DPDKRing2::new(name_for_pop, 1024*1024))),
         )?;
 
         Ok(new_socket)

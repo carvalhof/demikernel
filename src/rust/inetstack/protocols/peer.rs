@@ -40,11 +40,12 @@ impl<N: NetworkRuntime> Peer<N> {
         transport: N,
         arp: SharedArpPeer<N>,
         rng_seed: [u8; 32],
+        shared_between_cores: *mut crate::runtime::SharedBetweenCores
     ) -> Result<Self, Fail> {
         let udp: SharedUdpPeer<N> = SharedUdpPeer::<N>::new(config, runtime.clone(), transport.clone(), arp.clone())?;
         let icmpv4: SharedIcmpv4Peer<N> =
             SharedIcmpv4Peer::<N>::new(config, runtime.clone(), transport.clone(), arp.clone(), rng_seed)?;
-        let tcp: SharedTcpPeer<N> = SharedTcpPeer::<N>::new(config, runtime.clone(), transport.clone(), arp, rng_seed)?;
+        let tcp: SharedTcpPeer<N> = SharedTcpPeer::<N>::new(config, runtime.clone(), transport.clone(), arp, rng_seed, shared_between_cores)?;
 
         Ok(Peer {
             local_ipv4_addr: config.local_ipv4_addr()?,

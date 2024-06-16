@@ -24,7 +24,7 @@ use ::futures::{
     FutureExt,
 };
 
-pub async fn background<N: NetworkRuntime>(cb: SharedControlBlock<N>, _dead_socket_tx: mpsc::UnboundedSender<QDesc>) {
+pub async fn background<N: NetworkRuntime>(cb: *mut SharedControlBlock<N>, _dead_socket_tx: mpsc::UnboundedSender<QDesc>) {
     //let acknowledger = async_timer!("tcp::established::background::acknowledger", acknowledger(cb.clone())).fuse();
     //pin_mut!(acknowledger);
 
@@ -34,8 +34,8 @@ pub async fn background<N: NetworkRuntime>(cb: SharedControlBlock<N>, _dead_sock
     //let sender = async_timer!("tcp::established::background::sender", sender(cb.clone())).fuse();
     //pin_mut!(sender);
 
-    let mut cb2: SharedControlBlock<N> = cb.clone();
-    let receiver = async_timer!("tcp::established::background::receiver", cb2.poll()).fuse();
+    // let mut cb2: SharedControlBlock<N> = cb.clone();
+    let receiver = async_timer!("tcp::established::background::receiver", unsafe { (*cb).poll() }).fuse();
     pin_mut!(receiver);
 
     let r = futures::select_biased! {

@@ -97,6 +97,24 @@ const TIMER_FINER_RESOLUTION: usize = 2;
 // Structures
 //======================================================================================================================
 
+/// Shared structure between different cores
+pub struct SharedBetweenCores {
+    // qd: QDesc,
+    // nr_runtimes: u16,
+    // lock: *mut DPDKSpinLock,
+    // // addresses: *mut HashMap<SocketId, SharedTcpSocket<SharedDPDKRuntime>>,
+    // addresses: *mut DPDKHashMap2,
+    // // qtable: *mut DPDKHashMap3,
+    // qtable: *mut IoQueueTable,
+    // // pub conn_list: *mut Vec<SharedAsyncQueue<(QDesc, *mut SharedControlBlock<SharedDPDKRuntime>)>>,
+    // // pub qd_to_cb: *mut HashMap<QDesc, *mut SharedControlBlock<SharedDPDKRuntime>>,
+    // pub qd_to_cb: *mut DPDKHashMap,
+    // // pub queues: *mut arrayvec::ArrayVec<*mut DPDKRing2, 16>,
+    // // pub queues_for_steal: *mut arrayvec::ArrayVec<*mut std::collections::VecDeque<*mut SharedControlBlock<SharedDPDKRuntime>>, 16>,
+
+    pub addresses: *mut crate::collections::dpdk_hashmap2::DPDKHashMap2,
+}
+
 /// Demikernel Runtime
 pub struct DemiRuntime {
     /// Shared IoQueueTable.
@@ -111,6 +129,7 @@ pub struct DemiRuntime {
     ts_iters: usize,
     /// Tasks that have been completed and removed from the
     completed_tasks: HashMap<QToken, (QDesc, OperationResult)>,
+    pub qd_to_cb: *mut crate::collections::dpdk_hashmap::DPDKHashMap,
 }
 
 #[derive(Clone)]
@@ -123,6 +142,20 @@ pub struct SharedBox<T: ?Sized>(SharedObject<Box<T>>);
 //======================================================================================================================
 // Associate Functions
 //======================================================================================================================
+
+impl SharedBetweenCores {
+    pub fn new(_nr_runtimes: u16) -> Self {
+
+        Self {
+            addresses: Box::into_raw(Box::new(crate::collections::dpdk_hashmap2::DPDKHashMap2::new())),
+        }
+    }
+
+    #[allow(unused)]
+    pub fn get_mut_on_addresses(&mut self, k: SocketId) -> Option<*mut crate::inetstack::protocols::tcp::socket::SharedTcpSocket<crate::catnip::runtime::SharedDPDKRuntime>> {
+        unsafe { (*self.addresses).get_mut(k) }
+    }
+}
 
 impl DemiRuntime {
     /// Checks if an operation should be retried based on the error code `err`.
@@ -147,6 +180,7 @@ impl SharedDemiRuntime {
             network_table: NetworkQueueTable::default(),
             ts_iters: 0,
             completed_tasks: HashMap::<QToken, (QDesc, OperationResult)>::new(),
+            qd_to_cb: Box::into_raw(Box::new(DPDKHashMap::new())),
         }))
     }
 
@@ -291,6 +325,37 @@ impl SharedDemiRuntime {
         }
     }
 
+    /// Waits until one of the tasks in qts has completed and returns the result.
+    pub fn try_wait_any(
+        &mut self,
+        qts: &[QToken],
+    ) -> Option<(usize, QToken, QDesc, OperationResult)> {
+        for (i, qt) in qts.iter().enumerate() {
+            // 1. Check if any of these queue tokens point to already completed tasks.
+            if let Some((qd, result)) = self.get_completed_task(&qt) {
+                return Some((i, *qt, qd, result));
+            }
+
+            // // 2. Make sure these queue tokens all point to valid tasks.
+            // if !self.scheduler.is_valid_task(&TaskId::from(*qt)) {
+            //     let cause: String = format!("{:?} is not a valid queue token", qt);
+            //     warn!("wait_any: {}", cause);
+            //     return Err(Fail::new(libc::EINVAL, &cause));
+            // }
+        }
+
+        // 3. None of the tasks have already completed, so move the clock.
+        self.advance_clock_to_now();
+
+        // 4. Invoke the scheduler and run some tasks.
+        // Run for one quanta and if one of our queue tokens completed, then return.
+        if let Some((i, qd, result)) = self.try_run_any(qts) {
+            return Some((i, qts[i], qd, result));
+        }
+
+        None
+    }
+
     pub fn get_completed_task(&mut self, qt: &QToken) -> Option<(QDesc, OperationResult)> {
         self.completed_tasks.remove(qt)
     }
@@ -337,6 +402,22 @@ impl SharedDemiRuntime {
         }
     }
 
+    pub fn try_run_any(&mut self, qts: &[QToken]) -> Option<(usize, QDesc, OperationResult)> {
+        if let Some((qt, qd, result)) = self.try_run_next() {
+            // Check whether it matches any of the queue tokens that we are waiting on.
+            for i in 0..qts.len() {
+                if qts[i] == qt {
+                    return Some((i, qd, result));
+                }
+            }
+
+            // If not a queue token that we are waiting on, then insert into our list of completed tasks.
+            self.completed_tasks.insert(qt, (qd, result));
+        }
+
+        None
+    }
+
     /// Runs the scheduler for one [TIMER_RESOLUTION] quanta, returning any task in `qts`. Importantly does not modify
     /// the clock.
     pub fn run_any(&mut self, qts: &[QToken], timeout: Duration) -> Option<(usize, QDesc, OperationResult)> {
@@ -350,6 +431,24 @@ impl SharedDemiRuntime {
 
             // If not a queue token that we are waiting on, then insert into our list of completed tasks.
             self.completed_tasks.insert(qt, (qd, result));
+        }
+
+        None
+    }
+
+    fn try_run_next(&mut self) -> Option<(QToken, QDesc, OperationResult)> {
+        if let Some(boxed_task) = self.scheduler.get_next_completed_task(1) {
+            // Perform bookkeeping for the completed and removed task.
+            trace!("Removing coroutine: {:?}", boxed_task.get_name());
+            let qt: QToken = boxed_task.get_id().into();
+
+            // If an operation task, then take a look at the result.
+            if let Ok(mut operation_task) = OperationTask::try_from(boxed_task.as_any()) {
+                let (qd, result): (QDesc, OperationResult) =
+                    expect_some!(operation_task.get_result(), "coroutine not finished");
+
+                return Some((qt, qd, result));
+            }
         }
 
         None
@@ -598,6 +697,7 @@ impl Default for SharedDemiRuntime {
             network_table: NetworkQueueTable::default(),
             ts_iters: 0,
             completed_tasks: HashMap::<QToken, (QDesc, OperationResult)>::new(),
+            qd_to_cb: Box::into_raw(Box::new(crate::collections::dpdk_hashmap::DPDKHashMap::new())),
         }))
     }
 }

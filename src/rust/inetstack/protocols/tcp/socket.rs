@@ -136,6 +136,13 @@ impl<N: NetworkRuntime> SharedTcpSocket<N> {
         }))
     }
 
+    pub fn get_cb(&self) -> *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<N> {
+        match self.state {
+            SocketState::Established(ref socket) => socket.cb,
+            _ => panic!("Socket is not established"),
+        }
+    }
+
     /// Set an SO_* option on the socket.
     pub fn set_socket_option(&mut self, option: SocketOption) -> Result<(), Fail> {
         match option {
@@ -348,9 +355,25 @@ impl<N: NetworkRuntime> SharedTcpSocket<N> {
 
     pub fn receive(&mut self, ip_hdr: Ipv4Header, tcp_hdr: TcpHeader, buf: DemiBuffer) {
         // If this queue has an allocated receive queue, then direct the packet there.
-        if let Some(recv_queue) = self.recv_queue.as_mut() {
-            recv_queue.push((ip_hdr, tcp_hdr, buf));
-            return;
+        match self.state {
+            SocketState::Established(ref mut socket) => {
+                log::warn!("Pushing on Established...");
+                unsafe {
+
+                    let ip_hdr_ptr: *mut Ipv4Header = std::ptr::null_mut(); //Box::into_raw(Box::new(ip_hdr));
+                    let tcp_hdr_ptr = Box::into_raw(Box::new(tcp_hdr));
+                    let buf_ptr = buf.into_mbuf().unwrap();
+
+                    (*(*(socket.cb)).aux_pop_queue).enqueue((ip_hdr_ptr, tcp_hdr_ptr, buf_ptr)).unwrap();
+                }
+            },
+            _ => {
+                log::warn!("Pushing on non-Established...");
+                if let Some(recv_queue) = self.recv_queue.as_mut() {
+                    recv_queue.push((ip_hdr, tcp_hdr, buf));
+                    return
+                }
+            }
         }
     }
 
