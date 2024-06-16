@@ -11,6 +11,8 @@ use crate::{
             AsyncQueue,
             SharedAsyncQueue,
         },
+        dpdk_ring::DPDKRing,
+        dpdk_ring2::DPDKRing2,
         async_value::SharedAsyncValue,
     },
     expect_ok,
@@ -156,6 +158,16 @@ impl Receiver {
         Ok(buf)
     }
 
+    pub fn try_pop(&mut self) -> Option<DemiBuffer> {
+        match self.recv_queue.try_pop() {
+            Some(buf) => {
+                self.reader_next = self.reader_next + SeqNumber::from(buf.len() as u32);
+                Some(buf)
+            }
+            None => None
+        }
+    }
+
     pub fn push(&mut self, buf: DemiBuffer) {
         let buf_len: u32 = buf.len() as u32;
         self.recv_queue.push(buf);
@@ -234,6 +246,9 @@ pub struct ControlBlock<N: NetworkRuntime> {
 
     ack_queue: SharedAsyncQueue<usize>,
     socket_queue: Option<SharedAsyncQueue<SocketAddrV4>>,
+    pub lock: *mut crate::collections::dpdk_spinlock::DPDKSpinLock,
+    pub aux_pop_queue: *mut DPDKRing2,
+    pub aux_push_queue: *mut DPDKRing,
 }
 
 #[derive(Clone)]
@@ -263,6 +278,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
         ack_queue: SharedAsyncQueue<usize>,
         socket_queue: Option<SharedAsyncQueue<SocketAddrV4>>,
+        lock: *mut crate::collections::dpdk_spinlock::DPDKSpinLock,
+        aux_pop_queue: *mut DPDKRing2,
+        aux_push_queue: *mut DPDKRing,
     ) -> Self {
         let sender: Sender = Sender::new(sender_seq_no, sender_window_size, sender_window_scale, sender_mss);
         Self(SharedObject::<ControlBlock<N>>::new(ControlBlock {
@@ -289,6 +307,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             recv_queue,
             ack_queue,
             socket_queue,
+            lock,
+            aux_pop_queue,
+            aux_push_queue,
         }))
     }
 
@@ -414,59 +435,33 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         self.recv_queue.push((ipv4_hdr, tcp_hdr, buf));
     }
 
+    pub fn try_pop(&mut self) -> Option<DemiBuffer> {
+        self.receiver.try_pop()
+    }
+
     // This is the main TCP processing routine.
     pub async fn poll(&mut self) -> Result<Never, Fail> {
+        let cb: *mut SharedControlBlock<N> = self as *mut Self as *mut SharedControlBlock<N>;
         // Normal data processing in the Established state.
-        loop {
-            let (header, data): (TcpHeader, DemiBuffer) = match self.recv_queue.try_pop() {
-                Some((_, header, data)) if self.state == State::Established => (header, data),
-                Some(result) => {
-                    self.recv_queue.push_front(result);
-                    let cause: String = format!(
-                        "ending receive polling loop for non-established connection (local={:?}, remote={:?})",
-                        self.local, self.remote
-                    );
-                    error!("poll(): {}", cause);
-                    return Err(Fail::new(libc::ECANCELED, &cause));
-                },
-                None => {
-                    let cause: String = format!(
-                        "ending receive polling loop for active connection (local={:?}, remote={:?})",
-                        self.local, self.remote
-                    );
-                    warn!("poll(): {:?} ", cause);
-                    // return Err(e);
-                    poll_yield().await;
-                    continue;
-                },
-            };
-
-            debug!(
-                "{:?} Connection Receiving {} bytes + {:?}",
-                self.state,
-                data.len(),
-                header
-            );
-
-            match self.process_packet(header, data) {
-                Ok(()) => (),
-                Err(e) if e.errno == libc::ECONNRESET => {
-                    if let Some(mut socket_tx) = self.socket_queue.take() {
-                        socket_tx.push(self.remote);
-                    }
-                    self.state = State::CloseWait;
-                    let cause: String = format!(
-                        "remote closed connection, stopping processing (local={:?}, remote={:?})",
-                        self.local, self.remote
-                    );
-                    error!("poll(): {}", cause);
-                    return Err(Fail::new(libc::ECANCELED, &cause));
-                },
-                Err(e) => debug!("Dropped packet: {:?}", e),
+        unsafe { loop {
+            if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+                let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
+                let t = self.clone();
+                (*cb).sender.send(buf, t).unwrap();
             }
+        
+            if let Some((_, tcp_hdr_ptr, data_ptr)) = (*(*cb).aux_pop_queue).dequeue::<(*mut Ipv4Header, *mut TcpHeader, *mut crate::runtime::libdpdk::rte_mbuf)>() {
+                // let _ = Box::from_raw(ip_hdr_ptr);
+                let header = *Box::from_raw(tcp_hdr_ptr);
+                let data = DemiBuffer::from_mbuf(data_ptr);
 
+                match self.process_packet(header, data) {
+                    Ok(()) => (),
+                    Err(e) => panic!("Dropped incoming packet: {:?}", e),
+                };
+            }
             poll_yield().await;
-        }
+        }}
     }
 
     /// This is the main function for processing an incoming packet during the Established state when the connection is
@@ -493,20 +488,20 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             self.process_data(&mut header, data, seg_start, seg_end, seg_len)?;
         }
         self.process_remote_close(&header)?;
-        // We should ACK this segment, preferably via piggybacking on a response.
-        // TODO: Consider replacing the delayed ACK timer with a simple flag.
-        if self.ack_deadline.get().is_none() {
-            // Start the delayed ACK timer to ensure an ACK gets sent soon even if no piggyback opportunity occurs.
-            let timeout: Duration = self.ack_delay_timeout;
-            // Getting the current time is extremely cheap as it is just a variable lookup.
-            let now: Instant = self.get_now();
-            self.ack_deadline.set(Some(now + timeout));
-        } else {
-            // We already owe our peer an ACK (the timer was already running), so cancel the timer and ACK now.
-            self.ack_deadline.set(None);
-            trace!("process_packet(): sending ack on deadline expiration");
-            self.send_ack();
-        }
+        // // We should ACK this segment, preferably via piggybacking on a response.
+        // // TODO: Consider replacing the delayed ACK timer with a simple flag.
+        // if self.ack_deadline.get().is_none() {
+        //     // Start the delayed ACK timer to ensure an ACK gets sent soon even if no piggyback opportunity occurs.
+        //     let timeout: Duration = self.ack_delay_timeout;
+        //     // Getting the current time is extremely cheap as it is just a variable lookup.
+        //     let now: Instant = self.get_now();
+        //     self.ack_deadline.set(Some(now + timeout));
+        // } else {
+        //     // We already owe our peer an ACK (the timer was already running), so cancel the timer and ACK now.
+        //     self.ack_deadline.set(None);
+        //     trace!("process_packet(): sending ack on deadline expiration");
+        //     self.send_ack();
+        // }
 
         Ok(())
     }

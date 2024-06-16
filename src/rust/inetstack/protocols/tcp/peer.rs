@@ -73,6 +73,7 @@ pub struct TcpPeer<N: NetworkRuntime> {
     rng: SmallRng,
     dead_socket_tx: mpsc::UnboundedSender<QDesc>,
     addresses: HashMap<SocketId, SharedTcpSocket<N>>,
+    shared_between_cores: *mut crate::runtime::SharedBetweenCores,
 }
 
 #[derive(Clone)]
@@ -89,6 +90,7 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
         transport: N,
         arp: SharedArpPeer<N>,
         rng_seed: [u8; 32],
+        shared_between_cores: *mut crate::runtime::SharedBetweenCores,
     ) -> Result<Self, Fail> {
         let mut rng: SmallRng = SmallRng::from_seed(rng_seed);
         let nonce: u32 = rng.gen();
@@ -105,6 +107,7 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
             rng,
             dead_socket_tx: tx,
             addresses: HashMap::<SocketId, SharedTcpSocket<N>>::new(),
+            shared_between_cores,
         })))
     }
 
@@ -170,6 +173,9 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
                     SocketId::Active(socket.local().unwrap(), socket.remote().unwrap()),
                     socket.clone(),
                 );
+                unsafe {
+                    let _ = (*(*self.shared_between_cores).addresses).insert(SocketId::Active(socket.local().unwrap(), socket.remote().unwrap()), Box::into_raw(Box::new(socket.clone())));
+                }
                 Ok(socket)
             },
             Err(e) => Err(e),

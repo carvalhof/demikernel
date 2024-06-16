@@ -15,7 +15,10 @@ use ::demikernel::{
     LibOS,
     LibOSName,
     demi_sgarray_t,
-    collections::dpdk_spinlock::DPDKSpinLock,
+    collections::{
+        dpdk_ring2::DPDKRing2,
+        dpdk_spinlock::DPDKSpinLock,
+    },
     runtime::libdpdk::{
         rte_lcore_count,
         rte_get_timer_hz,
@@ -49,7 +52,6 @@ use ::std::{
     env,
     sync::Arc,
     str::FromStr,
-    time::Duration,
     net::SocketAddr,
 };
 
@@ -73,6 +75,7 @@ use ::demikernel::perftools::profiler;
 //==============================================================================
 
 const REQUEST_SIZE: usize = 64;
+const RING_SIZE: u32 = 128*1024;
 
 //======================================================================================================================
 // Flow affinity (DPDK)
@@ -287,10 +290,20 @@ impl FakeWorker {
 }
 
 struct WorkerArg {
-    worker_id: u16,
-    addr: SocketAddr,
+    worker_id: usize,
+    dispatcher_id: usize,
     spec: Arc<String>,
     spinlock: *mut DPDKSpinLock,
+    from_worker: *mut DPDKRing2,
+    to_worker: *mut DPDKRing2,
+}
+
+struct DispatcherArg {
+    addr: SocketAddr,
+    dispatcher_id: usize,
+    spinlock: *mut DPDKSpinLock,
+    from_workers: *mut DPDKRing2,
+    to_workers: *mut DPDKRing2,
 }
 
 //======================================================================================================================
@@ -307,18 +320,60 @@ extern "C" fn worker_wrapper(data: *mut std::os::raw::c_void) -> i32 {
 }
 
 fn worker_fn(args: &mut WorkerArg) -> ! {
+    let dispatcher_id: usize = args.dispatcher_id;
+    let worker_id: usize = args.worker_id;
+    let to_worker: *mut DPDKRing2 = args.to_worker;
+    let from_worker: *mut DPDKRing2 = args.from_worker;
+
+    // Create the FakeWorker
+    let fakework: FakeWorker = FakeWorker::create(args.spec.as_str()).unwrap();
+    fakework.warmup_cache();
+
+    // Releasing the lock.
+    unsafe { (*args.spinlock).unlock() };
+
+    loop {
+        if let Some((qd, sga)) = unsafe { (*to_worker).dequeue::<(QDesc, demi_sgarray_t)>() } {
+
+            let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
+            unsafe {
+                let iterations: u64 = *((ptr.offset(32)) as *mut u64);
+                let randomness: u64 = *((ptr.offset(40)) as *mut u64);
+                *((ptr.offset(24)) as *mut u64) = ((dispatcher_id << 4) | worker_id) as u64;
+                fakework.work(iterations, randomness);
+            }
+
+            if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga)) } {
+                panic!("Error: {:}", e);
+            }
+        }
+    }
+}
+
+//======================================================================================================================
+// Dispatcher
+//======================================================================================================================
+
+extern "C" fn dispatcher_wrapper(data: *mut std::os::raw::c_void) -> i32 {
+    let args: &mut DispatcherArg = unsafe { &mut *(data as *mut DispatcherArg) };
+
+    dispatcher_fn(args);
+
+    #[allow(unreachable_code)]
+    0
+}
+
+fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
     let addr: SocketAddr = args.addr;
-    let worker_id: u16 = args.worker_id;
+    let dispatcher_id: usize = args.dispatcher_id;
+    let to_workers: *mut DPDKRing2 = args.to_workers;
+    let from_workers: *mut DPDKRing2 = args.from_workers;
 
     // Create the LibOS
     let mut libos: LibOS = match LibOS::new(LibOSName::Catnip) {
         Ok(libos) => libos,
         Err(e) => panic!("failed to initialize libos: {:?}", e),
     };
-
-    // Create the FakeWorker
-    let fakework: FakeWorker = FakeWorker::create(args.spec.as_str()).unwrap();
-    fakework.warmup_cache();
 
     // Setup peer.
     let sockqd: QDesc = match libos.socket(AF_INET, SOCK_STREAM, 0) {
@@ -341,7 +396,6 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     // Releasing the lock.
     unsafe { (*args.spinlock).unlock(); }
 
-    let timeout: Option<Duration> = None;
     let mut qts: Vec<QToken> = Vec::with_capacity(1024);
 
     // Accept incoming connection.
@@ -350,8 +404,17 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     }
 
     loop {
+        // Try to get an application reply
+        if let Some((qd, sga)) = unsafe { (*from_workers).dequeue::<(QDesc, demi_sgarray_t)>() } {
+            log::warn!("[d{:?}]: Got reply from worker.", dispatcher_id);
+            // Push the reply.
+            if let Ok(qt) = libos.push(qd, &sga) {
+                qts.push(qt);
+            }
+        }
+
         // Wait for some event.
-        if let Ok ((idx, qr)) = libos.wait_any(&qts, timeout) {
+        if let Some((idx, qr)) = libos.try_wait_any(&qts) {
             // Remove the qtoken.
             qts.remove(idx);
 
@@ -378,22 +441,12 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                 }
                 demikernel::runtime::types::demi_opcode_t::DEMI_OPC_POP => {
                     // Process the request.
+                    let qd: QDesc = qr.qr_qd.into();
                     let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
 
-                    let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                    unsafe {
-                        let iterations: u64 = *((ptr.offset(32)) as *mut u64);
-                        let randomness: u64 = *((ptr.offset(40)) as *mut u64);
-                        *((ptr.offset(24)) as *mut u64) = worker_id as u64;
-                        fakework.work(iterations, randomness);
+                    if let Err(e) = unsafe { (*to_workers).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga)) } {
+                        panic!("Error: {:?}", e);
                     }
-
-                    // Push the reply.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.push(qd, &sga) {
-                        qts.push(qt);
-                    }
-                    
                 }
                 _ => panic!("Not should be here"),
             }
@@ -408,7 +461,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 /// Prints program usage and exits.
 fn usage(program_name: &String) {
     println!("Usage:");
-    println!("{} MODE address CORES nr_threads FAKEWORK\n", program_name);
+    println!("{} MODE address CORES nr_dispatcher nr_workers FAKEWORK\n", program_name);
     println!("Modes:");
     println!("  --client    Run program in client mode.");
     println!("  --server    Run program in server mode.\n");
@@ -463,8 +516,9 @@ pub fn main() -> Result<()> {
         if args[1] == "--server" {
             let addr: SocketAddr = SocketAddr::from_str(&args[2])?;
             let list_of_cores: Vec<&str> = args[3].split(":").collect();
-            let nr_workers: usize = usize::from_str(&args[4])?;
-            let spec: Arc<String> = Arc::new(args[5].clone());
+            let nr_dispatchers: usize = usize::from_str(&args[4])?;
+            let nr_workers: usize = usize::from_str(&args[5])?;
+            let spec: Arc<String> = Arc::new(args[6].clone());
 
             // Checking for Catnip LibOS.
             match LibOSName::from_env() {
@@ -479,8 +533,8 @@ pub fn main() -> Result<()> {
 
             // Initialize DPDK EAL.
             {
-                let rx_queues: u16 = nr_workers as u16;
-                let tx_queues: u16 = nr_workers as u16;
+                let rx_queues: u16 = nr_dispatchers as u16;
+                let tx_queues: u16 = nr_dispatchers as u16;
                 match LibOS::init(rx_queues, tx_queues) {
                     Ok(()) => (),
                     Err(e) => anyhow::bail!("{:?}", e),
@@ -489,30 +543,57 @@ pub fn main() -> Result<()> {
             
             // Ensure the number of lcores.
             unsafe {
-                if rte_lcore_count() < ((nr_workers + 1) as u32) || list_of_cores.len() < (nr_workers + 1) as usize {
-                    panic!("The number of DPDK lcores should be at least {:?}", nr_workers + 1);
+                if rte_lcore_count() < ((nr_workers + nr_dispatchers + 1) as u32) || list_of_cores.len() < (nr_workers + nr_dispatchers + 1) as usize {
+                    panic!("The number of DPDK lcores should be at least {:?}", nr_workers + nr_dispatchers + 1);
                 }
             }
 
             // Install flow rules to steer the incoming packets.
-            flow_affinity(nr_workers);
+            flow_affinity(nr_dispatchers);
 
             let mut lcore_idx: usize = 1;
             let spinlock: *mut DPDKSpinLock = Box::into_raw(Box::new(DPDKSpinLock::new()));
 
-            for worker_id in 0..nr_workers {
-                let mut arg: WorkerArg = WorkerArg {
-                    addr,
-                    worker_id: worker_id as u16,
-                    spec: Arc::clone(&spec),
-                    spinlock,
-                };
+            for dispatcher_id in 0..nr_dispatchers {
+                let name_to_workers: String = format!("to_workers_d{:?}", dispatcher_id);
+                let name_from_workers: String = format!("from_workers_d{:?}", dispatcher_id);
 
+                let to_workers: *mut DPDKRing2 = Box::into_raw(Box::new(DPDKRing2::new(name_to_workers, RING_SIZE)));
+                let from_workers: *mut DPDKRing2 = Box::into_raw(Box::new(DPDKRing2::new(name_from_workers, RING_SIZE)));
+
+                // We ensure that we have integer division here
+                for worker_id in 0..(nr_workers/nr_dispatchers) {
+                    let mut arg: WorkerArg = WorkerArg {
+                        worker_id,
+                        dispatcher_id,                       
+                        spec: Arc::clone(&spec),
+                        spinlock,
+                        from_worker: from_workers,
+                        to_worker: to_workers,
+                    };
+
+                    let lcore: u32 = u32::from_str(list_of_cores[lcore_idx])?;
+                    lcore_idx += 1;
+                    unsafe { (*spinlock).set() };
+                    let arg_ptr: *mut std::os::raw::c_void = &mut arg as *mut _ as *mut std::os::raw::c_void;
+                    unsafe { rte_eal_remote_launch(Some(worker_wrapper), arg_ptr, lcore) };
+
+                    unsafe { (*spinlock).lock() };
+                }
+
+                let mut arg: DispatcherArg = DispatcherArg {
+                    addr,
+                    dispatcher_id,
+                    spinlock,
+                    from_workers,
+                    to_workers,
+                };
+                
                 let lcore: u32 = u32::from_str(list_of_cores[lcore_idx])?;
                 lcore_idx += 1;
                 unsafe { (*spinlock).set() };
                 let arg_ptr: *mut std::os::raw::c_void = &mut arg as *mut _ as *mut std::os::raw::c_void;
-                unsafe { rte_eal_remote_launch(Some(worker_wrapper), arg_ptr, lcore) };
+                unsafe { rte_eal_remote_launch(Some(dispatcher_wrapper), arg_ptr, lcore) };
 
                 unsafe { (*spinlock).lock() };
             }
