@@ -49,7 +49,6 @@ use ::std::{
     env,
     sync::Arc,
     str::FromStr,
-    time::Duration,
     net::SocketAddr,
 };
 
@@ -341,7 +340,6 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     // Releasing the lock.
     unsafe { (*args.spinlock).unlock(); }
 
-    let timeout: Option<Duration> = None;
     let mut qts: Vec<QToken> = Vec::with_capacity(1024);
 
     // Accept incoming connection.
@@ -351,7 +349,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 
     loop {
         // Wait for some event.
-        if let Ok ((idx, qr)) = libos.wait_any(&qts, timeout) {
+        if let Some((idx, qr)) = libos.try_wait_any(&qts) {
             // Remove the qtoken.
             qts.remove(idx);
 
@@ -396,6 +394,24 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                     
                 }
                 _ => panic!("Not should be here"),
+            }
+        } else {
+            if let Some(qr) = libos.wait_for_stealing() {
+
+                let cb = qr.qr_cb;
+                let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
+                let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
+                unsafe {
+                    let iterations: u64 = *((ptr.offset(32)) as *mut u64);
+                    let randomness: u64 = *((ptr.offset(40)) as *mut u64);
+                    *((ptr.offset(24)) as *mut u64) = worker_id as u64;
+                    fakework.work(iterations, randomness);
+                }
+
+                // Push the reply.
+                if let Ok(_) = libos.push_steal(cb, &sga) {
+                    log::warn!("[w{:?}]: Push (stole) DONE.", worker_id);
+                }
             }
         }
     }

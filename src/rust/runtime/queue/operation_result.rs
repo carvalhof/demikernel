@@ -25,6 +25,7 @@ pub enum OperationResult {
     Accept((QDesc, SocketAddrV4)),
     Push,
     Pop(Option<SocketAddrV4>, DemiBuffer),
+    PopSteal(*mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::catnip::runtime::SharedDPDKRuntime>, DemiBuffer),
     Close,
     Failed(Fail),
 }
@@ -40,6 +41,7 @@ impl fmt::Debug for OperationResult {
             OperationResult::Accept(..) => write!(f, "Accept"),
             OperationResult::Push => write!(f, "Push"),
             OperationResult::Pop(..) => write!(f, "Pop"),
+            OperationResult::PopSteal(..) => write!(f, "PopSteal"),
             OperationResult::Close => write!(f, "Close"),
             OperationResult::Failed(ref e) => write!(f, "Failed({:?})", e),
         }

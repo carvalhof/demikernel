@@ -26,6 +26,7 @@ pub enum demi_opcode_t {
     DEMI_OPC_INVALID = 0,
     DEMI_OPC_PUSH,
     DEMI_OPC_POP,
+    DEMI_OPC_POP_STEAL,
     DEMI_OPC_ACCEPT,
     DEMI_OPC_CONNECT,
     DEMI_OPC_CLOSE,
@@ -52,6 +53,7 @@ pub struct demi_qresult_t {
     pub qr_opcode: demi_opcode_t,
     pub qr_qd: u32,
     pub qr_qt: demi_qtoken_t,
+    pub qr_cb: *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::catnip::runtime::SharedDPDKRuntime>,
     pub qr_ret: i64,
     pub qr_value: demi_qr_value_t,
 }

@@ -46,7 +46,7 @@ impl DPDKSpinLock {
         unsafe { rte_spinlock_lock(self.locked) }
     }
 
-    pub fn trylock(&self) -> bool {
+    pub fn try_lock(&self) -> bool {
         let ret: i32 = unsafe { rte_spinlock_trylock(self.locked) };
         
         ret == 1

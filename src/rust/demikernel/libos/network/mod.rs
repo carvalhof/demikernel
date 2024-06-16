@@ -214,6 +214,14 @@ impl NetworkLibOSWrapper {
     }
 
     /// Pushes a scatter-gather array to a TCP socket.
+    pub fn push_steal(&mut self, cb: *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::catnip::runtime::SharedDPDKRuntime>, sga: &demi_sgarray_t) -> Result<(), Fail> {
+        match self {
+            #[cfg(feature = "catnip-libos")]
+            NetworkLibOSWrapper::Catnip(libos) => libos.push_steal(cb, sga),
+        }
+    }
+
+    /// Pushes a scatter-gather array to a TCP socket.
     pub fn push(&mut self, sockqd: QDesc, sga: &demi_sgarray_t) -> Result<QToken, Fail> {
         match self {
             #[cfg(feature = "catpowder-libos")]
@@ -281,6 +289,20 @@ impl NetworkLibOSWrapper {
             NetworkLibOSWrapper::Catnip(libos) => libos.wait_any(qts, timeout),
             #[cfg(feature = "catloop-libos")]
             NetworkLibOSWrapper::Catloop(libos) => libos.wait_any(qts, timeout),
+        }
+    }
+
+    pub fn try_wait_any(&mut self, qts: &[QToken]) -> Option<(usize, demi_qresult_t)> {
+        match self {
+            #[cfg(feature = "catnip-libos")]
+            NetworkLibOSWrapper::Catnip(libos) => libos.try_wait_any(qts),
+        }
+    }
+
+    pub fn wait_for_stealing(&mut self) -> Option<demi_qresult_t> {
+        match self {
+            #[cfg(feature = "catnip-libos")]
+            NetworkLibOSWrapper::Catnip(libos) => libos.wait_for_stealing(),
         }
     }
 

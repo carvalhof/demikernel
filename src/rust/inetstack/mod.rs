@@ -112,14 +112,14 @@ pub struct SharedInetStack<N: NetworkRuntime>(SharedObject<InetStack<N>>);
 //======================================================================================================================
 
 impl<N: NetworkRuntime> SharedInetStack<N> {
-    pub fn new(config: &Config, runtime: SharedDemiRuntime, network: N) -> Result<Self, Fail> {
-        SharedInetStack::<N>::new_test(config, runtime, network)
+    pub fn new(config: &Config, runtime: SharedDemiRuntime, network: N, shared_between_cores: *mut crate::runtime::SharedBetweenCores) -> Result<Self, Fail> {
+        SharedInetStack::<N>::new_test(config, runtime, network, shared_between_cores)
     }
 
-    pub fn new_test(config: &Config, mut runtime: SharedDemiRuntime, network: N) -> Result<Self, Fail> {
+    pub fn new_test(config: &Config, mut runtime: SharedDemiRuntime, network: N, shared_between_cores: *mut crate::runtime::SharedBetweenCores) -> Result<Self, Fail> {
         let rng_seed: [u8; 32] = [0; 32];
         let arp: SharedArpPeer<N> = SharedArpPeer::new(config, runtime.clone(), network.clone())?;
-        let ipv4: Peer<N> = Peer::new(config, runtime.clone(), network.clone(), arp.clone(), rng_seed)?;
+        let ipv4: Peer<N> = Peer::new(config, runtime.clone(), network.clone(), arp.clone(), rng_seed, shared_between_cores)?;
         let me: Self = Self(SharedObject::<InetStack<N>>::new(InetStack::<N> {
             arp,
             ipv4,
@@ -174,7 +174,7 @@ impl<N: NetworkRuntime> SharedInetStack<N> {
         self.ipv4.get_local_addr()
     }
 
-    #[cfg(test)]
+    // #[cfg(test)]
     pub fn get_network(&self) -> N {
         self.network.clone()
     }
