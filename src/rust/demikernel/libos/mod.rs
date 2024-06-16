@@ -64,6 +64,11 @@ use ::std::{
         SocketAddr,
         SocketAddrV4,
     },
+    sync::{
+        Arc,
+        Once, 
+        Mutex,
+    },
     time::Duration,
 };
 
@@ -73,6 +78,9 @@ use crate::catloop::transport::SharedCatloopTransport;
 use crate::catmem::SharedCatmemLibOS;
 #[cfg(feature = "catnap-libos")]
 use crate::catnap::transport::SharedCatnapTransport;
+
+static INIT: Once = Once::new();
+static mut SHARED_BETWEEN_CORES: Option<Arc<Mutex<*mut crate::runtime::SharedBetweenCores>>> = None;
 
 //======================================================================================================================
 // Structures
@@ -133,6 +141,12 @@ impl LibOS {
             &config,
         )?;
 
+        unsafe {
+            INIT.call_once(|| {
+                SHARED_BETWEEN_CORES = Some(Arc::new(Mutex::new(Box::into_raw(Box::new(crate::runtime::SharedBetweenCores::new(tx_queues))))));
+            });
+        }
+
         Ok(())
     }
     
@@ -192,8 +206,9 @@ impl LibOS {
             LibOSName::Catnip => {
                 // TODO: Remove some of these clones once we are done merging the libOSes.
                 let transport: SharedDPDKRuntime = SharedDPDKRuntime::new(&config)?;
+                let shared_between_cores = unsafe { *SHARED_BETWEEN_CORES.as_ref().unwrap().clone().lock().unwrap() };
                 let inetstack: SharedInetStack<SharedDPDKRuntime> =
-                    SharedInetStack::<SharedDPDKRuntime>::new(&config, runtime.clone(), transport).unwrap();
+                    SharedInetStack::<SharedDPDKRuntime>::new(&config, runtime.clone(), transport, shared_between_cores).unwrap();
 
                 Self::NetworkLibOS(NetworkLibOSWrapper::Catnip(SharedNetworkLibOS::<
                     SharedInetStack<SharedDPDKRuntime>,
@@ -201,6 +216,7 @@ impl LibOS {
                     config.local_ipv4_addr()?,
                     runtime.clone(),
                     inetstack,
+                    shared_between_cores
                 )))
             },
             #[cfg(feature = "catmem-libos")]
@@ -631,6 +647,19 @@ impl LibOS {
             LibOS::NetworkLibOS(libos) => libos.wait_any(qts, timeout.unwrap_or(DEFAULT_TIMEOUT)),
             #[cfg(feature = "catmem-libos")]
             LibOS::MemoryLibOS(libos) => libos.wait_any(qts, timeout.unwrap_or(DEFAULT_TIMEOUT)),
+        }
+    }
+
+    pub fn try_wait_any(&mut self, qts: &[QToken]) -> Option<(usize, demi_qresult_t)> {
+        // No profiling scope here because we may enter a coroutine scope.
+        match self {
+            #[cfg(any(
+                feature = "catnap-libos",
+                feature = "catnip-libos",
+                feature = "catpowder-libos",
+                feature = "catloop-libos"
+            ))]
+            LibOS::NetworkLibOS(libos) => libos.try_wait_any(qts),
         }
     }
 

@@ -1,14 +1,19 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-mod background;
+pub mod background;
 pub mod congestion_control;
-mod ctrlblk;
+pub mod ctrlblk;
 mod rto;
 mod sender;
 
 use crate::{
     collections::async_queue::SharedAsyncQueue,
+    collections::{
+        dpdk_spinlock::DPDKSpinLock,
+        dpdk_ring::DPDKRing,
+        dpdk_ring2::DPDKRing2,
+    },
     inetstack::{
         protocols::{
             ipv4::Ipv4Header,
@@ -46,7 +51,7 @@ use ::std::{
 
 #[derive(Clone)]
 pub struct EstablishedSocket<N: NetworkRuntime> {
-    pub cb: SharedControlBlock<N>,
+    pub cb: *mut SharedControlBlock<N>,
     recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
     // We need this to eventually stop the background task on close.
     #[allow(unused)]
@@ -81,9 +86,12 @@ impl<N: NetworkRuntime> EstablishedSocket<N> {
         congestion_control_options: Option<congestion_control::Options>,
         dead_socket_tx: mpsc::UnboundedSender<QDesc>,
         socket_queue: Option<SharedAsyncQueue<SocketAddrV4>>,
+        lock: *mut DPDKSpinLock,
+        aux_pop_queue: *mut DPDKRing2,
     ) -> Result<Self, Fail> {
         // TODO: Maybe add the queue descriptor here.
-        let cb = SharedControlBlock::new(
+        let name_for_push = format!("Ring_TX_{:?}\0", remote);
+        let cb = Box::into_raw(Box::new(SharedControlBlock::new(
             local,
             remote,
             runtime.clone(),
@@ -105,15 +113,18 @@ impl<N: NetworkRuntime> EstablishedSocket<N> {
             recv_queue.clone(),
             ack_queue.clone(),
             socket_queue,
-        );
+            lock,
+            aux_pop_queue,
+            Box::into_raw(Box::new(DPDKRing::new(name_for_push, 1024*1024))),
+        )));
         let qt: QToken = runtime.insert_background_coroutine(
             "Inetstack::TCP::established::background",
-            Box::pin(background::background(cb.clone(), dead_socket_tx).fuse()),
+            Box::pin(background::background(cb, dead_socket_tx).fuse()),
         )?;
         Ok(Self {
             cb,
             recv_queue,
-            background_task_qt: qt.clone(),
+            background_task_qt: qt,
             runtime: runtime.clone(),
         })
     }
@@ -123,30 +134,30 @@ impl<N: NetworkRuntime> EstablishedSocket<N> {
     }
 
     pub fn send(&mut self, buf: DemiBuffer) -> Result<(), Fail> {
-        self.cb.send(buf)
+        unsafe { (*self.cb).send(buf) }
     }
 
     pub async fn push(&mut self, nbytes: usize) -> Result<(), Fail> {
-        self.cb.push(nbytes).await
+        unsafe { (*self.cb).push(nbytes).await }
     }
 
     pub async fn pop(&mut self, size: Option<usize>) -> Result<DemiBuffer, Fail> {
-        self.cb.pop(size).await
+        unsafe { (*self.cb).pop(size).await }
     }
 
     pub async fn close(&mut self) -> Result<(), Fail> {
-        self.cb.close().await
+        unsafe { (*self.cb).close().await }
     }
 
     pub fn remote_mss(&self) -> usize {
-        self.cb.remote_mss()
+        unsafe { (*self.cb).remote_mss() }
     }
 
     pub fn current_rto(&self) -> Duration {
-        self.cb.rto()
+        unsafe { (*self.cb).rto() }
     }
 
     pub fn endpoints(&self) -> (SocketAddrV4, SocketAddrV4) {
-        (self.cb.get_local(), self.cb.get_remote())
+        unsafe { ((*self.cb).get_local(), (*self.cb).get_remote()) }
     }
 }

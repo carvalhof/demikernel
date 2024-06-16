@@ -284,6 +284,13 @@ impl NetworkLibOSWrapper {
         }
     }
 
+    pub fn try_wait_any(&mut self, qts: &[QToken]) -> Option<(usize, demi_qresult_t)> {
+        match self {
+            #[cfg(feature = "catnip-libos")]
+            NetworkLibOSWrapper::Catnip(libos) => libos.try_wait_any(qts),
+        }
+    }
+
     /// Waits in a loop until the next task is complete, passing the result to `acceptor`. This process continues until
     /// either the acceptor returns false (in which case the method returns Ok), or the timeout has expired (in which
     /// the method returns an `Err` indicating timeout).

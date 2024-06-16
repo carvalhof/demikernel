@@ -49,7 +49,6 @@ use ::std::{
     env,
     sync::Arc,
     str::FromStr,
-    time::Duration,
     net::SocketAddr,
 };
 
@@ -341,7 +340,6 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     // Releasing the lock.
     unsafe { (*args.spinlock).unlock(); }
 
-    let timeout: Option<Duration> = None;
     let mut qts: Vec<QToken> = Vec::with_capacity(1024);
 
     // Accept incoming connection.
@@ -351,7 +349,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 
     loop {
         // Wait for some event.
-        if let Ok ((idx, qr)) = libos.wait_any(&qts, timeout) {
+        if let Some((idx, qr)) = libos.try_wait_any(&qts) {
             // Remove the qtoken.
             qts.remove(idx);
 
