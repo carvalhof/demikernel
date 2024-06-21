@@ -116,8 +116,8 @@ impl MemoryManager {
 
     /// Allocates a header mbuf.
     /// TODO: Review the need of this function after we are done with the refactor of the DPDK runtime.
-    pub fn alloc_header_mbuf(&self) -> Result<DemiBuffer, Fail> {
-        let mbuf_ptr: *mut rte_mbuf = self.header_pool.alloc_mbuf(None)?;
+    pub fn alloc_header_mbuf(&self, headers_size: usize) -> Result<DemiBuffer, Fail> {
+        let mbuf_ptr: *mut rte_mbuf = self.header_pool.alloc_mbuf(Some(headers_size))?;
         Ok(unsafe { DemiBuffer::from_mbuf(mbuf_ptr) })
     }
 
@@ -145,14 +145,20 @@ impl MemoryManager {
         }
 
         // First allocate the underlying DemiBuffer.
-        let buf: DemiBuffer = if size > self.config.get_inline_body_size() && size <= self.config.get_max_body_size() {
+        // let buf: DemiBuffer = if size > self.config.get_inline_body_size() && size <= self.config.get_max_body_size() {
+        //     // Allocate a DPDK-managed buffer.
+        //     let mbuf_ptr: *mut rte_mbuf = self.body_pool.alloc_mbuf(Some(size))?;
+        //     // Safety: `mbuf_ptr` is a valid pointer to a properly initialized `rte_mbuf` struct.
+        //     unsafe { DemiBuffer::from_mbuf(mbuf_ptr) }
+        // } else {
+        //     // Allocate a heap-managed buffer.
+        //     DemiBuffer::new(size as u16)
+        // };
+        let buf: DemiBuffer = {
             // Allocate a DPDK-managed buffer.
             let mbuf_ptr: *mut rte_mbuf = self.body_pool.alloc_mbuf(Some(size))?;
             // Safety: `mbuf_ptr` is a valid pointer to a properly initialized `rte_mbuf` struct.
             unsafe { DemiBuffer::from_mbuf(mbuf_ptr) }
-        } else {
-            // Allocate a heap-managed buffer.
-            DemiBuffer::new(size as u16)
         };
 
         // Create a scatter-gather segment to expose the DemiBuffer to the user.

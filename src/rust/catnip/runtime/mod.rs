@@ -375,7 +375,7 @@ impl NetworkRuntime for SharedDPDKRuntime {
                 }
             }
             None => {
-                let mut mbuf: DemiBuffer = match self.mm.alloc_header_mbuf() {
+                let mut mbuf: DemiBuffer = match self.mm.alloc_header_mbuf(headers_size) {
                     Ok(mbuf) => mbuf,
                     Err(e) => panic!("failed to allocate mbuf: {:?}", e.cause),
                 };
@@ -392,10 +392,11 @@ impl NetworkRuntime for SharedDPDKRuntime {
             }
         };
 
-        let headers_ptr: &mut [u8] = &mut mbuf[..headers_size];
+        let headers_ptr: &mut [u8] = &mut mbuf;
         buf.write_header(headers_ptr);
 
         let mut mbuf_ptr: *mut rte_mbuf = expect_some!(mbuf.into_mbuf(), "mbuf cannot be empty");
+        unsafe { (*mbuf_ptr).ol_flags |= 1 << 52 }; // RTE_MBUF_F_TX_TCP_CKSUM
         let num_sent: u16 = unsafe { rte_eth_tx_burst(self.port_id, self.queue_id, &mut mbuf_ptr, 1) };
         debug_assert_eq!(num_sent, 1);
     }
