@@ -337,7 +337,7 @@ impl NetworkLibOSWrapper {
             #[cfg(feature = "catnip-libos")]
             // TODO: Move this over to the transport once we set that up.
             // FIXME: https://github.com/microsoft/demikernel/issues/1057
-            NetworkLibOSWrapper::Catnip(libos) => libos.sgaalloc(size),
+            NetworkLibOSWrapper::Catnip(libos) => libos.get_transport().get_network().mm.alloc_sgarray(size),
             #[cfg(feature = "catloop-libos")]
             NetworkLibOSWrapper::Catloop(libos) => libos.sgaalloc(size),
         }

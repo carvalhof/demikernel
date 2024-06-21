@@ -127,7 +127,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     let mut addr: SocketAddr = args.addr;
 
     // Create the LibOS
-    let mut libos: LibOS = match LibOS::new(LibOSName::Catnip) {
+    let mut libos: LibOS = match LibOS::new(LibOSName::Catnip, None) {
         Ok(libos) => libos,
         Err(e) => panic!("failed to initialize libos: {:?}", e),
     };

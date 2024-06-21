@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 # Build Artifacts
+database.db/
 contrib/
 target/
 bin/

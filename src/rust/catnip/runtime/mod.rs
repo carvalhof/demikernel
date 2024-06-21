@@ -98,7 +98,7 @@ static mut GLOBAL_MEMORY_MANAGER: Option<Arc<Mutex<Arc<MemoryManager>>>> = None;
 
 /// DPDK Runtime
 pub struct DPDKRuntime {
-    mm: Arc<MemoryManager>,
+    pub mm: Arc<MemoryManager>,
     port_id: u16,
     queue_id: u16,
     link_addr: MacAddress,
