@@ -86,7 +86,8 @@ pub struct NetworkLibOS<T: NetworkTransport> {
     /// Underlying network transport.
     transport: T,
     shared_between_cores: *mut crate::runtime::SharedBetweenCores,
-    established_queue: *mut crate::collections::dpdk_ring2::DPDKRing2,
+    established_queue: *mut crate::collections::dpdk_ring3::DPDKRing3,
+    last_counter: usize,
 }
 
 #[derive(Clone)]
@@ -107,6 +108,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             transport,
             shared_between_cores,
             established_queue,
+            last_counter: 0,
         }))
     }
 
@@ -558,24 +560,25 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     pub fn wait_for_stealing(&mut self) -> Option<demi_qresult_t> {
         let transport = ((&self.transport as &dyn std::any::Any).downcast_ref::<crate::demikernel::libos::SharedInetStack<crate::demikernel::libos::SharedDPDKRuntime>>().unwrap().clone()).get_network();
 
-        unsafe {
-            if let Some(cb) = (*self.established_queue).dequeue::<*mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::demikernel::libos::SharedDPDKRuntime>>() {
-                if (*(*cb).lock).try_lock() {
-                    if (*cb).poll_stealing(transport.clone()) {
-                        if let Some(buf) = (*cb).try_pop() {
-                            (*(*cb).lock).unlock();
-                            let result = OperationResult::PopSteal(cb, buf);
-                            let qd = 0.into();
-                            let qt = 0.into();
-                            let qr = self.create_result(result, qd, qt);
+        self.last_counter += 1;
 
-                            let _ = (*self.established_queue).enqueue(cb).unwrap();
-                            return Some(qr);
-                        }
+        unsafe {
+            // if let Some(cb) = (*self.established_queue).dequeue::<*mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::demikernel::libos::SharedDPDKRuntime>>() {
+            if let Some(cb) = (*self.established_queue).peek(self.last_counter) {
+                if (*(*cb).lock).try_lock() {
+                    if let Some(buf) = (*cb).poll_stealing(transport.clone()) {
+                        (*(*cb).lock).unlock();
+                        let result = OperationResult::PopSteal(cb, buf);
+                        let qd = 0.into();
+                        let qt = 0.into();
+                        let qr = self.create_result(result, qd, qt);
+
+                        // let _ = (*self.established_queue).enqueue(cb).unwrap();
+                        return Some(qr);
                     }
                     (*(*cb).lock).unlock();
                 }
-                let _ = (*self.established_queue).enqueue(cb).unwrap();
+                // let _ = (*self.established_queue).enqueue(cb).unwrap();
             }
         }
 

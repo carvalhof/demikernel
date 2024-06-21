@@ -113,7 +113,7 @@ pub struct SharedBetweenCores {
     // // pub queues_for_steal: *mut arrayvec::ArrayVec<*mut std::collections::VecDeque<*mut SharedControlBlock<SharedDPDKRuntime>>, 16>,
 
     pub addresses: *mut crate::collections::dpdk_hashmap2::DPDKHashMap2,
-    pub established_queue: *mut crate::collections::dpdk_ring2::DPDKRing2,
+    pub established_queue: *mut crate::collections::dpdk_ring3::DPDKRing3,
 }
 
 /// Demikernel Runtime
@@ -149,7 +149,7 @@ impl SharedBetweenCores {
 
         Self {
             addresses: Box::into_raw(Box::new(crate::collections::dpdk_hashmap2::DPDKHashMap2::new())),
-            established_queue: Box::into_raw(Box::new(crate::collections::dpdk_ring2::DPDKRing2::new(format!("established_queue"), 128))),
+            established_queue: Box::into_raw(Box::new(crate::collections::dpdk_ring3::DPDKRing3::new(format!("established_queue"), 128))),
         }
     }
 

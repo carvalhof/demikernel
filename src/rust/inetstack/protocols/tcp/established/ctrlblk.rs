@@ -473,8 +473,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         }}
     }
 
-    pub fn poll_stealing(&mut self, transport: N) -> bool {
-        let mut ret: bool = false;
+    pub fn poll_stealing(&mut self, transport: N) -> Option<DemiBuffer> {
         let cb: *mut SharedControlBlock<N> = self as *mut Self as *mut SharedControlBlock<N>;
 
         unsafe {
@@ -486,13 +485,13 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
                 let data = DemiBuffer::from_mbuf(data_ptr);
 
                 match self.process_packet(header, data) {
-                    Ok(()) => ret = true,
+                    Ok(()) => (),
                     Err(e) => panic!("Dropped incoming packet: {:?}", e),
                 };
             }
-        }
 
-        ret
+            (*cb).try_pop()
+        }
     }
 
     /// This is the main function for processing an incoming packet during the Established state when the connection is

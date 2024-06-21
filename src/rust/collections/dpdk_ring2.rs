@@ -49,7 +49,7 @@ impl DPDKRing2 {
         if unsafe { rte_ring_enqueue(self.ring, obj_ptr ) } == 0 {
             Ok(())
         } else {
-            Err(Fail::new(libc::EINVAL, "ring is full"))
+            Err(Fail::new(libc::EINVAL, "ring2s is full"))
         }
     }
 
