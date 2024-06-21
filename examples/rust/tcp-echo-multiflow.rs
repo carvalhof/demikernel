@@ -310,7 +310,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     let worker_id: u16 = args.worker_id;
 
     // Create the LibOS
-    let mut libos: LibOS = match LibOS::new(LibOSName::Catnip) {
+    let mut libos: LibOS = match LibOS::new(LibOSName::Catnip, None) {
         Ok(libos) => libos,
         Err(e) => panic!("failed to initialize libos: {:?}", e),
     };

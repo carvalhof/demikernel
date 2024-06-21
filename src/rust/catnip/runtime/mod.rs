@@ -396,6 +396,7 @@ impl NetworkRuntime for SharedDPDKRuntime {
         buf.write_header(headers_ptr);
 
         let mut mbuf_ptr: *mut rte_mbuf = expect_some!(mbuf.into_mbuf(), "mbuf cannot be empty");
+        unsafe { (*mbuf_ptr).ol_flags |= 1 << 52 }; // RTE_MBUF_F_TX_TCP_CKSUM
         let num_sent: u16 = unsafe { rte_eth_tx_burst(self.port_id, self.queue_id, &mut mbuf_ptr, 1) };
         debug_assert_eq!(num_sent, 1);
     }
