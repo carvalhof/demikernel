@@ -152,7 +152,8 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
 
         // Issue operation.
         socket.bind(local)?;
-        self.addresses.insert(SocketId::Passive(local), socket.clone());
+        // self.addresses.insert(SocketId::Passive(local), socket.clone());
+        let _ = unsafe { (*(*self.shared_between_cores).addresses).insert(SocketId::Active(local, SocketAddrV4::new(Ipv4Addr::new(0, 0, 0,0), 0)), Box::into_raw(Box::new(socket.clone()))) };
         Ok(())
     }
 
@@ -301,20 +302,28 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
         }
 
         // Retrieve the queue descriptor based on the incoming segment.
-        let socket: &mut SharedTcpSocket<N> = match self.addresses.get_mut(&SocketId::Active(local, remote)) {
-            Some(socket) => socket,
-            None => match self.addresses.get_mut(&SocketId::Passive(local)) {
-                Some(socket) => socket,
-                None => {
-                    let cause: String = format!("no queue descriptor for remote address (remote={})", remote.ip());
-                    error!("receive(): {}", &cause);
-                    return;
+        let socket = unsafe {
+            match (*self.shared_between_cores).get_mut_on_addresses(SocketId::Active(local, remote)) {
+                Some(socket) => {
+                    log::warn!("Found on EstablishedSocket");
+                    socket
                 },
-            },
+                None => match (*self.shared_between_cores).get_mut_on_addresses(SocketId::Active(local, SocketAddrV4::new(Ipv4Addr::new(0, 0, 0,0), 0))) {
+                    Some(socket) => {
+                        log::warn!("Found on PassiveSocket");
+                        socket
+                    },
+                    None => {
+                        let cause: String = format!("no queue descriptor for remote address (remote={})", remote.ip());
+                        error!("receive(): {}", &cause);
+                        return;
+                    },
+                },
+            }
         };
 
         // Dispatch to further processing depending on the socket state.
-        socket.receive(ip_hdr, tcp_hdr, data)
+        unsafe { (*socket).receive(ip_hdr, tcp_hdr, data) }
     }
 }
 

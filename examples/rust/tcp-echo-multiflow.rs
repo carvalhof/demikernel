@@ -319,32 +319,39 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     let fakework: FakeWorker = FakeWorker::create(args.spec.as_str()).unwrap();
     fakework.warmup_cache();
 
-    // Setup peer.
-    let sockqd: QDesc = match libos.socket(AF_INET, SOCK_STREAM, 0) {
-        Ok(qd) => qd,
-        Err(e) => panic!("failed to create socket: {:?}", e.cause),
-    };
+    // Configuring the network stack (only worker_id=0).
+    if worker_id == 0 {
+        // Setup peer.
+        let sockqd: QDesc = match libos.socket(AF_INET, SOCK_STREAM, 0) {
+            Ok(qd) => qd,
+            Err(e) => panic!("failed to create socket: {:?}", e.cause),
+        };
 
-    // Bind the socket
-    match libos.bind(sockqd, addr) {
-        Ok(()) => (),
-        Err(e) => panic!("bind failed: {:?}", e.cause),
-    };
+        // Bind the socket
+        match libos.bind(sockqd, addr) {
+            Ok(()) => (),
+            Err(e) => panic!("bind failed: {:?}", e.cause),
+        };
 
-    // Mark the socket as a passive one.
-    match libos.listen(sockqd, 256) {
-        Ok(()) => (),
-        Err(e) => panic!("listen failed: {:?}", e.cause),
-    };
+        // Mark the socket as a passive one.
+        match libos.listen(sockqd, 256) {
+            Ok(()) => (),
+            Err(e) => panic!("listen failed: {:?}", e.cause),
+        };
+
+        libos.set_qd(sockqd);
+    }
 
     // Releasing the lock.
     unsafe { (*args.spinlock).unlock(); }
 
     let mut qts: Vec<QToken> = Vec::with_capacity(1024);
 
-    // Accept incoming connection.
-    if let Ok(qt) = libos.accept(sockqd) {
-        qts.push(qt);
+    // Accept incoming connection (only worker_id=0).
+    if worker_id == 0 {
+        if let Ok(qt) = libos.accept(libos.get_qd()) {
+            qts.push(qt);
+        }
     }
 
     loop {
@@ -363,7 +370,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                     }
 
                     // Accept a new incoming connection.
-                    if let Ok(qt) = libos.accept(sockqd) {
+                    if let Ok(qt) = libos.accept(libos.get_qd()) {
                         qts.push(qt);
                     }
                 }
@@ -396,7 +403,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                 _ => panic!("Not should be here"),
             }
         } else {
-            if let Some(qr) = libos.wait_for_stealing() {
+            if let Some(qr) = libos.secondary_wait() {
 
                 let cb = qr.qr_cb;
                 let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
@@ -409,7 +416,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                 }
 
                 // Push the reply.
-                if let Ok(_) = libos.push_steal(cb, &sga) {
+                if let Ok(_) = libos.secondary_push(cb, &sga) {
                     log::warn!("[w{:?}]: Push (stole) DONE.", worker_id);
                 }
             }
@@ -495,7 +502,7 @@ pub fn main() -> Result<()> {
 
             // Initialize DPDK EAL.
             {
-                let rx_queues: u16 = nr_workers as u16;
+                let rx_queues: u16 = 1 as u16;
                 let tx_queues: u16 = nr_workers as u16;
                 match LibOS::init(rx_queues, tx_queues) {
                     Ok(()) => (),
@@ -511,7 +518,7 @@ pub fn main() -> Result<()> {
             }
 
             // Install flow rules to steer the incoming packets.
-            flow_affinity(nr_workers);
+            flow_affinity(1);
 
             let mut lcore_idx: usize = 1;
             let spinlock: *mut DPDKSpinLock = Box::into_raw(Box::new(DPDKSpinLock::new()));

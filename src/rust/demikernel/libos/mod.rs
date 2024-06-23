@@ -539,7 +539,7 @@ impl LibOS {
         result
     }
 
-    pub fn push_steal(&mut self, cb: *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::catnip::runtime::SharedDPDKRuntime>, sga: &demi_sgarray_t) -> Result<(), Fail> {
+    pub fn secondary_push(&mut self, cb: *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::catnip::runtime::SharedDPDKRuntime>, sga: &demi_sgarray_t) -> Result<(), Fail> {
         let result: Result<(), Fail> = {
             timer!("demikernel::push_steal");
             match self {
@@ -549,13 +549,13 @@ impl LibOS {
                     feature = "catpowder-libos",
                     feature = "catloop-libos"
                 ))]
-                LibOS::NetworkLibOS(libos) => libos.push_steal(cb, sga),
+                LibOS::NetworkLibOS(libos) => libos.secondary_push(cb, sga),
                 #[cfg(feature = "catmem-libos")]
                 LibOS::MemoryLibOS(_) => todo!(),
             }
         };
 
-        self.poll();
+        // self.poll();
 
         result
     }
@@ -577,7 +577,7 @@ impl LibOS {
             }
         };
 
-        self.poll();
+        // self.poll();
 
         result
     }
@@ -633,7 +633,7 @@ impl LibOS {
             }
         };
 
-        self.poll();
+        // self.poll();
 
         result
     }
@@ -684,7 +684,7 @@ impl LibOS {
         }
     }
 
-    pub fn wait_for_stealing(&mut self) -> Option<demi_qresult_t> {
+    pub fn secondary_wait(&mut self) -> Option<demi_qresult_t> {
         match self {
             #[cfg(any(
                 feature = "catnap-libos",
@@ -692,7 +692,7 @@ impl LibOS {
                 feature = "catpowder-libos",
                 feature = "catloop-libos"
             ))]
-            LibOS::NetworkLibOS(libos) => libos.wait_for_stealing(),
+            LibOS::NetworkLibOS(libos) => libos.secondary_wait(),
         }
     }
 
@@ -771,6 +771,34 @@ impl LibOS {
             LibOS::NetworkLibOS(libos) => libos.poll(),
             #[cfg(feature = "catmem-libos")]
             LibOS::MemoryLibOS(libos) => libos.poll(),
+        }
+    }
+
+    pub fn set_qd(&mut self, qd: QDesc) {
+        match self {
+            #[cfg(any(
+                feature = "catnap-libos",
+                feature = "catnip-libos",
+                feature = "catpowder-libos",
+                feature = "catloop-libos"
+            ))]
+            LibOS::NetworkLibOS(libos) => libos.set_qd(qd),
+            #[cfg(feature = "catmem-libos")]
+            LibOS::MemoryLibOS(_) => todo!(),
+        }
+    }
+
+    pub fn get_qd(&self) -> QDesc {
+        match self {
+            #[cfg(any(
+                feature = "catnap-libos",
+                feature = "catnip-libos",
+                feature = "catpowder-libos",
+                feature = "catloop-libos"
+            ))]
+            LibOS::NetworkLibOS(libos) => libos.get_qd(),
+            #[cfg(feature = "catmem-libos")]
+            LibOS::MemoryLibOS(_) => todo!(),
         }
     }
 }

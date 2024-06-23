@@ -15,6 +15,10 @@ use crate::{
     demikernel::config::Config,
     expect_some,
     inetstack::protocols::ethernet2::MIN_PAYLOAD_SIZE,
+    collections::{
+        dpdk_ring::DPDKRing,
+        dpdk_spinlock::DPDKSpinLock,
+    },
     runtime::{
         fail::Fail,
         libdpdk::{
@@ -91,6 +95,8 @@ static mut NEXT_QUEUE_ID: Option<Arc<Mutex<u16>>> = None;
 static mut GLOBAL_PORT_ID: Option<Arc<Mutex<u16>>> = None;
 static mut GLOBAL_LINK_ADDR: Option<Arc<Mutex<MacAddress>>> = None;
 static mut GLOBAL_MEMORY_MANAGER: Option<Arc<Mutex<Arc<MemoryManager>>>> = None;
+static mut GLOBAL_RXQ_LOCK: Option<Arc<Mutex<*mut DPDKSpinLock>>> = None;
+static mut GLOBAL_Q_PTR: Option<Arc<Mutex<*mut DPDKRing>>> = None;
 
 //======================================================================================================================
 // Structures
@@ -103,6 +109,9 @@ pub struct DPDKRuntime {
     queue_id: u16,
     link_addr: MacAddress,
     ipv4_addr: Ipv4Addr,
+    // Specific for cFCFS
+    rxq_lock: *mut DPDKSpinLock,
+    q_ptr: *mut DPDKRing,
 }
 
 #[derive(Clone)]
@@ -173,6 +182,10 @@ impl SharedDPDKRuntime {
                 GLOBAL_PORT_ID = Some(Arc::new(Mutex::new(port_id)));
                 GLOBAL_LINK_ADDR = Some(Arc::new(Mutex::new(local_link_addr)));
                 GLOBAL_MEMORY_MANAGER = Some(Arc::new(Mutex::new(memory_manager.clone())));
+                GLOBAL_RXQ_LOCK = Some(Arc::new(Mutex::new(Box::into_raw(Box::new(DPDKSpinLock::new())))));
+                let ring_name = format!("global_q_ptr");
+                let ring_size = 1024*1024;
+                GLOBAL_Q_PTR = Some(Arc::new(Mutex::new(Box::into_raw(Box::new(DPDKRing::new(ring_name, ring_size))))));
             });
         }
 
@@ -353,12 +366,21 @@ impl NetworkRuntime for SharedDPDKRuntime {
             )
         };
 
+        let (rxq_lock, q_ptr) = unsafe {
+            (
+                *GLOBAL_RXQ_LOCK.as_ref().unwrap().clone().lock().unwrap(),
+                *GLOBAL_Q_PTR.as_ref().unwrap().clone().lock().unwrap(),
+            )
+        };
+
         Ok(Self(SharedObject::<DPDKRuntime>::new(DPDKRuntime {
             mm,
             port_id,
             queue_id,
             link_addr,
             ipv4_addr: config.local_ipv4_addr()?,
+            rxq_lock,
+            q_ptr,
         })))
     }
 
@@ -404,16 +426,23 @@ impl NetworkRuntime for SharedDPDKRuntime {
     fn receive(&mut self) -> ArrayVec<DemiBuffer, RECEIVE_BATCH_SIZE> {
         let mut out = ArrayVec::new();
 
+        unsafe { (*self.rxq_lock).lock() }
         let mut packets: [*mut rte_mbuf; RECEIVE_BATCH_SIZE] = unsafe { mem::zeroed() };
-        let nb_rx = unsafe { rte_eth_rx_burst(self.port_id, self.queue_id, packets.as_mut_ptr(), RECEIVE_BATCH_SIZE as u16) };
+        let nb_rx = unsafe { rte_eth_rx_burst(self.port_id, 0, packets.as_mut_ptr(), RECEIVE_BATCH_SIZE as u16) };
         assert!(nb_rx as usize <= RECEIVE_BATCH_SIZE);
+        unsafe { (*self.rxq_lock).unlock() };
 
-        {
+        if nb_rx != 0 {
             for &packet in &packets[..nb_rx as usize] {
-                // Safety: `packet` is a valid pointer to a properly initialized `rte_mbuf` struct.
-                let buf: DemiBuffer = unsafe { DemiBuffer::from_mbuf(packet) };
-                out.push(buf);
+                if let Err(e) = unsafe { (*self.q_ptr).enqueue(packet) } {
+                    panic!("Error on enqueue incoming packets: {:?}", e)
+                }
             }
+        }
+
+        if let Some(packet) = unsafe { (*self.q_ptr).dequeue() } {
+            let buf: DemiBuffer = unsafe { DemiBuffer::from_mbuf(packet) };
+            out.push(buf);
         }
 
         out

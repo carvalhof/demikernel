@@ -101,6 +101,7 @@ pub struct SharedNetworkLibOS<T: NetworkTransport>(SharedObject<NetworkLibOS<T>>
 impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// Instantiates a Catnap LibOS.
     pub fn new(local_ipv4_addr: Ipv4Addr, runtime: SharedDemiRuntime, transport: T, shared_between_cores: *mut crate::runtime::SharedBetweenCores) -> Self {
+        use rand::Rng;
         let established_queue = unsafe { (*shared_between_cores).established_queue };
         Self(SharedObject::new(NetworkLibOS::<T> {
             local_ipv4_addr,
@@ -108,7 +109,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             transport,
             shared_between_cores,
             established_queue,
-            last_counter: 0,
+            last_counter: rand::thread_rng().gen(),
         }))
     }
 
@@ -408,7 +409,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
         }
     }
 
-    pub fn push_steal(&mut self, cb: *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::demikernel::libos::SharedDPDKRuntime>, sga: &demi_sgarray_t) -> Result<(), Fail> {
+    pub fn secondary_push(&mut self, cb: *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::demikernel::libos::SharedDPDKRuntime>, sga: &demi_sgarray_t) -> Result<(), Fail> {
         let buf: DemiBuffer = unsafe {
             let token: std::ptr::NonNull<u8> = std::ptr::NonNull::new_unchecked(sga.sga_buf as *mut u8);
             DemiBuffer::from_raw(token)
@@ -557,7 +558,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
         None
     }
 
-    pub fn wait_for_stealing(&mut self) -> Option<demi_qresult_t> {
+    pub fn secondary_wait(&mut self) -> Option<demi_qresult_t> {
         let transport = ((&self.transport as &dyn std::any::Any).downcast_ref::<crate::demikernel::libos::SharedInetStack<crate::demikernel::libos::SharedDPDKRuntime>>().unwrap().clone()).get_network();
 
         self.last_counter += 1;
@@ -565,7 +566,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
         unsafe {
             if let Some(cb) = (*self.established_queue).peek(self.last_counter) {
                 if (*(*cb).lock).try_lock() {
-                    if let Some(buf) = (*cb).poll_stealing(transport.clone()) {
+                    if let Some(buf) = (*cb).secondary_poll(transport.clone()) {
                         (*(*cb).lock).unlock();
                         let result = OperationResult::PopSteal(cb, buf);
                         let qd = 0.into();
@@ -732,6 +733,14 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// This exposes the transport for testing purposes.
     pub fn get_runtime(&self) -> SharedDemiRuntime {
         self.runtime.clone()
+    }
+
+    pub fn set_qd(&mut self, qd: QDesc) {
+        unsafe { (*self.shared_between_cores).set_qd(qd) }
+    }
+
+    pub fn get_qd(&self) -> QDesc {
+        unsafe { (*self.shared_between_cores).get_qd() }
     }
 }
 

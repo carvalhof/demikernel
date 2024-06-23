@@ -471,12 +471,18 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         }}
     }
 
-    pub fn poll_stealing(&mut self, transport: N) -> Option<DemiBuffer> {
+    pub fn secondary_poll(&mut self, transport: N) -> Option<DemiBuffer> {
         let cb: *mut SharedControlBlock<N> = self as *mut Self as *mut SharedControlBlock<N>;
 
         unsafe {
             let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
             std::mem::forget(old_transport);
+
+            if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+                let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
+                let t = self.clone();
+                (*cb).sender.send(buf, t).unwrap();
+            }
 
             if let Some((_, tcp_hdr_ptr, data_ptr)) = (*(*cb).aux_pop_queue).dequeue::<(*mut Ipv4Header, *mut TcpHeader, *mut crate::runtime::libdpdk::rte_mbuf)>() {
                 let header = *Box::from_raw(tcp_hdr_ptr);

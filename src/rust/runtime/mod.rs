@@ -99,6 +99,7 @@ const TIMER_FINER_RESOLUTION: usize = 2;
 
 /// Shared structure between different cores
 pub struct SharedBetweenCores {
+    qd: QDesc,
     pub addresses: *mut crate::collections::dpdk_hashmap2::DPDKHashMap2,
     pub established_queue: *mut crate::collections::dpdk_ring3::DPDKRing3,
 }
@@ -135,12 +136,20 @@ impl SharedBetweenCores {
     pub fn new(_nr_runtimes: u16) -> Self {
 
         Self {
+            qd: 0.into(),
             addresses: Box::into_raw(Box::new(crate::collections::dpdk_hashmap2::DPDKHashMap2::new())),
             established_queue: Box::into_raw(Box::new(crate::collections::dpdk_ring3::DPDKRing3::new(format!("established_queue"), 128))),
         }
     }
 
-    #[allow(unused)]
+    pub fn set_qd(&mut self, qd: QDesc) {
+        self.qd = qd;
+    }
+
+    pub fn get_qd(&self) -> QDesc {
+        self.qd
+    }
+
     pub fn get_mut_on_addresses(&mut self, k: SocketId) -> Option<*mut crate::inetstack::protocols::tcp::socket::SharedTcpSocket<crate::catnip::runtime::SharedDPDKRuntime>> {
         unsafe { (*self.addresses).get_mut(k) }
     }
