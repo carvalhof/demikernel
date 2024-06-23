@@ -44,6 +44,7 @@ socket2 = "0.5.7"
 yaml-rust = "0.4.5"
 x86 = "0.52.0"
 arraydeque = "0.4"
+rocksdb = "0.22.0"
 
 # Local crates.
 nettest = { path = "nettest" }
@@ -74,8 +75,8 @@ crate-type = ["cdylib", "rlib"]
 path = "src/rust/lib.rs"
 
 [[example]]
-name = "tcp-echo-multiflow"
-path = "examples/rust/tcp-echo-multiflow.rs"
+name = "server_db"
+path = "examples/rust/server_db.rs"
 
 
 #=======================================================================================================================
