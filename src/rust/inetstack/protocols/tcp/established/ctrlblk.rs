@@ -445,8 +445,6 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         // Normal data processing in the Established state.
         unsafe { loop {
             if (*(*cb).lock).try_lock() { 
-            // {
-                // (*(*cb).lock).lock();
                 let old_transport = std::mem::replace(&mut (*cb).transport, transport.clone());
                 std::mem::forget(old_transport);
 

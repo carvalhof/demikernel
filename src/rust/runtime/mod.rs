@@ -99,19 +99,6 @@ const TIMER_FINER_RESOLUTION: usize = 2;
 
 /// Shared structure between different cores
 pub struct SharedBetweenCores {
-    // qd: QDesc,
-    // nr_runtimes: u16,
-    // lock: *mut DPDKSpinLock,
-    // // addresses: *mut HashMap<SocketId, SharedTcpSocket<SharedDPDKRuntime>>,
-    // addresses: *mut DPDKHashMap2,
-    // // qtable: *mut DPDKHashMap3,
-    // qtable: *mut IoQueueTable,
-    // // pub conn_list: *mut Vec<SharedAsyncQueue<(QDesc, *mut SharedControlBlock<SharedDPDKRuntime>)>>,
-    // // pub qd_to_cb: *mut HashMap<QDesc, *mut SharedControlBlock<SharedDPDKRuntime>>,
-    // pub qd_to_cb: *mut DPDKHashMap,
-    // // pub queues: *mut arrayvec::ArrayVec<*mut DPDKRing2, 16>,
-    // // pub queues_for_steal: *mut arrayvec::ArrayVec<*mut std::collections::VecDeque<*mut SharedControlBlock<SharedDPDKRuntime>>, 16>,
-
     pub addresses: *mut crate::collections::dpdk_hashmap2::DPDKHashMap2,
     pub established_queue: *mut crate::collections::dpdk_ring3::DPDKRing3,
 }

@@ -563,7 +563,6 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
         self.last_counter += 1;
 
         unsafe {
-            // if let Some(cb) = (*self.established_queue).dequeue::<*mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::demikernel::libos::SharedDPDKRuntime>>() {
             if let Some(cb) = (*self.established_queue).peek(self.last_counter) {
                 if (*(*cb).lock).try_lock() {
                     if let Some(buf) = (*cb).poll_stealing(transport.clone()) {
@@ -573,12 +572,10 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
                         let qt = 0.into();
                         let qr = self.create_result(result, qd, qt);
 
-                        // let _ = (*self.established_queue).enqueue(cb).unwrap();
                         return Some(qr);
                     }
                     (*(*cb).lock).unlock();
                 }
-                // let _ = (*self.established_queue).enqueue(cb).unwrap();
             }
         }
 
