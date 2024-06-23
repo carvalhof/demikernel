@@ -15,5 +15,3 @@ cfg_if! {
         pub mod concurrent_ring;
     }
 }
-
-pub mod dpdk_spinlock;

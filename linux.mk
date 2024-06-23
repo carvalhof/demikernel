@@ -78,7 +78,7 @@ CARGO_FEATURES += $(FEATURES)
 
 #=======================================================================================================================
 
-all: init | all-libs all-examples
+all: init | all-libs
 
 init:
 	mkdir -p $(LIBDIR)

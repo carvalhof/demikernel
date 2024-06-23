@@ -14,6 +14,11 @@
 #include <sys/types.h>
 #include <glue.h>
 
+static __thread char real_buffer[2048];
+static __thread char *buffered;
+static __thread int buffered_len;
+static __thread demi_sgarray_t *buffered_sga;
+
 static size_t fill_iov(const struct iovec *iov, demi_sgarray_t *sga,
         uint32_t iovcnt, uint32_t sgacnt);
 
@@ -38,16 +43,139 @@ ssize_t __read(int sockfd, void *buf, size_t count)
         // Check if read operation has completed.
         if ((ev = queue_man_get_pop_result(sockfd)) != NULL)
         {
+            int last_idx = 0;
+            int total_copied = 0;
+
+            // printf("\n\n\n EV-QT = %d\n\n\n", ev->qt);
+
+            if(ev->qt != 1) {
+                // Isso eh uma nova solicitacao provavelmente do restante do buiffer
+                if(buffered_len != 0) {
+                    // printf("\n[MENSAGEM--BUFFER]\n\n");
+                    // for(int i= 0; i < buffered_len; i++) {
+                    //     printf("%c", ((char*) buffered)[i]);
+                    // }
+                    // printf("\n\n[%d]\n\n\n", buffered_len);
+
+                    if(count < buffered_len) {
+                        memcpy(buf, buffered, count);
+                        buffered = buffered + count;
+                        buffered_len = buffered_len - count;
+
+                        return (count);
+                    } else {
+                        // printf("\n\t\t\t eh o caso em que o que a a aplicara quer eh mais do que tem no buffer\n");
+                        // printf("\t\t\t buffered_len=%d e precciso pegar count-buffered_len=%ld bytes\n", buffered_len, count-buffered_len);
+                        last_idx = buffered_len;
+                        memcpy(buf, buffered, buffered_len);
+                        total_copied += buffered_len;
+                        // atualiza o count
+                        // printf("\t\t\t atualizando o count de %ld para %ld\n", count, count-buffered_len);
+                        count = count - buffered_len;
+                        // buffered = real_buffer;
+                        buffered_len = 0;
+                        // memset(real_buffer, 0, 2048);
+                        // __demi_sgafree(buffered_sga);
+
+                        // printf("\n[MENSAGEM--APLICACAO]\n\n");
+                        // for(int i= 0; i < total_copied; i++) {
+                        //     printf("%c", ((char*) buf)[i]);
+                        // }
+                        // printf("\n\n[%d]\n\n\n", total_copied);
+
+                        // printf("\n\t\t\t\t COUNT era %ld e TOTAL_COPIED era %d\n", count, total_copied);
+                        return (total_copied);
+                    }
+                }
+            }
+
+            // // se tem buffer, eh dessa ultima mensagem, então podemos aumentar
+            // if(ev->qt != -1 && buffered_len != 0) {
+            //     ev->qr.qr_value.sga.sga_segs[0].sgaseg_buf = ((char*)ev->qr.qr_value.sga.sga_segs[0].sgaseg_buf) + buffered_len;
+            //     ev->qr.qr_value.sga.sga_segs[0].sgaseg_len -= buffered_len;
+            // }
+
+            // printf("\n[MENSAGEM] -- do eve\n\n");
+            // for(int i= 0; i < ev->qr.qr_value.sga.sga_segs[0].sgaseg_len; i++) {
+            //     printf("%c", ((char*) ev->qr.qr_value.sga.sga_segs[0].sgaseg_buf)[i]);
+            // }
+            // printf("\n\n[%d]\n\n\n", ev->qr.qr_value.sga.sga_segs[0].sgaseg_len);
+
+            // int last_idx = 0;
+            // int total_copied = 0;
+            if(buffered_len != 0) {
+            //     printf("\n[MENSAGEM--BUFFER]\n\n");
+            // for(int i= 0; i < buffered_len; i++) {
+            //     printf("%c", ((char*) buffered)[i]);
+            // }
+            // printf("\n\n[%d]\n\n\n", buffered_len);
+
+
+                if(count < buffered_len) {
+                    memcpy(buf, buffered, count);
+                    buffered = buffered + count;
+                    buffered_len = buffered_len - count;
+
+                    // printf("\t\t\tESTOU PEGANDO %ld e tem %d bytes\n", count, buffered_len);
+
+                    return (count);
+                } else {
+                    // printf("\n\t\t\t eh o caso em que o que a a aplicara quer eh mais do que tem no buffer\n");
+                    // printf("\t\t\t buffered_len=%d e precciso pegar count-buffered_len=%ld bytes\n", buffered_len, count-buffered_len);
+                    last_idx = buffered_len;
+                    memcpy(buf, buffered, buffered_len);
+                    total_copied += buffered_len;
+                    // atualiza o count
+                    // printf("\t\t\t atualizando o count de %ld para %ld\n", count, count-buffered_len);
+                    count = count - buffered_len;
+                    // buffered = real_buffer;
+                    buffered_len = 0;
+                    // memset(real_buffer, 0, 2048);
+                    // __demi_sgafree(buffered_sga);
+                }
+            } else {
+                // printf("\n\t\t\t esse eh o caso em que nao tem nada bufferizado e quero pegar %ld\n", count);
+            }
+
             assert(ev->used == 1);
             assert(ev->sockqd == sockfd);
-            assert(ev->qt == (demi_qtoken_t)-1);
+            // assert(ev->qt == (demi_qtoken_t)-1);
             assert(ev->qr.qr_value.sga.sga_numsegs == 1);
 
             // TODO: We should support buffering.
-            assert(count >= ev->qr.qr_value.sga.sga_segs[0].sgaseg_len);
+            if (count < ev->qr.qr_value.sga.sga_segs[0].sgaseg_len) {
+                // |-----------sgaseg_len------------|
+                // |----count----|----remaining------|
 
-            // Round down the number of bytes to read accordingly.
-            count = MIN(count, ev->qr.qr_value.sga.sga_segs[0].sgaseg_len);
+                // printf("\t\t\t caso em que quero buscar algo menorr que recebi len=%d e count=%ld\n", ev->qr.qr_value.sga.sga_segs[0].sgaseg_len, count);
+
+                buffered_sga = &ev->qr.qr_value.sga;
+                buffered_len = ev->qr.qr_value.sga.sga_segs[0].sgaseg_len - count;
+                // memcpy(real_buffer, ((char*) ev->qr.qr_value.sga.sga_segs[0].sgaseg_buf) + count, buffered_len);
+                buffered = ((char*) ev->qr.qr_value.sga.sga_segs[0].sgaseg_buf) + count;
+                // buffered = real_buffer;
+
+                //test
+
+
+                // printf("\t\t\t com isso, bufferizei %d bytes\n", buffered_len);
+                // printf("\t\t\t e marco o socket como pronto para outro pop\n");
+
+                ev->qt = -2;
+                queue_man_set_pop_result(ev->qr.qr_qd, ev);
+                //tenho que marcar que eh de uma retransmissao...
+
+            } else {
+                // printf("\t\t\t caso em que tenho tudo que queria em que count =%ld e o buffer recebido eh %d\n", count, ev->qr.qr_value.sga.sga_segs[0].sgaseg_len);
+                // Round down the number of bytes to read accordingly.
+                count = MIN(count, ev->qr.qr_value.sga.sga_segs[0].sgaseg_len);
+            }
+            // assert(count >= ev->qr.qr_value.sga.sga_segs[0].sgaseg_len);
+
+            // printf("\t\t\t no final das contas, eu quero count=%ld, buffered_len=%d e recebvido=%d e idx=%d\n", count, buffered_len, ev->qr.qr_value.sga.sga_segs[0].sgaseg_len, last_idx);
+
+            // // Round down the number of bytes to read accordingly.
+            // count = MIN(count, ev->qr.qr_value.sga.sga_segs[0].sgaseg_len);
 
             if (ev->qr.qr_value.sga.sga_segs[0].sgaseg_len == 0)
             {
@@ -58,7 +186,8 @@ ssize_t __read(int sockfd, void *buf, size_t count)
 
             if (count > 0)
             {
-                memcpy(buf, ev->qr.qr_value.sga.sga_segs[0].sgaseg_buf, count);
+                memcpy((char*) buf + last_idx, ev->qr.qr_value.sga.sga_segs[0].sgaseg_buf, count);
+                total_copied += count;
                 __demi_sgafree(&ev->qr.qr_value.sga);
             }
 
@@ -66,11 +195,21 @@ ssize_t __read(int sockfd, void *buf, size_t count)
             assert(__demi_pop(&ev->qt, ev->sockqd) == 0);
             assert(ev->qt != (demi_qtoken_t)-1);
 
-            return (count);
+            // return (count);
+
+            // printf("\n[MENSAGEM--APLICACAO]\n\n");
+            // for(int i= 0; i < total_copied; i++) {
+            //     printf("%c", ((char*) buf)[i]);
+            // }
+            // printf("\n\n[%d]\n\n\n", total_copied);
+
+            // printf("\n\t\t\t\t COUNT era %ld e TOTAL_COPIED era %d\n", count, total_copied);
+            return (total_copied);
         }
 
         // The read operation has not yet completed.
         errno = EWOULDBLOCK;
+
         return (-1);
     }
 

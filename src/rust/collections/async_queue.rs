@@ -12,18 +12,18 @@ use crate::runtime::{
     SharedObject,
 };
 use ::std::{
+    collections::{
+        vec_deque::{
+            Iter,
+            IterMut,
+        },
+        VecDeque,
+    },
     ops::{
         Deref,
         DerefMut,
     },
     time::Duration,
-};
-
-use arraydeque::{
-    Iter,
-    IterMut,
-    ArrayDeque,
-    Saturating,
 };
 
 //======================================================================================================================
@@ -33,9 +33,6 @@ use arraydeque::{
 // The following value was chosen arbitrarily.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
-// The queue size.
-const DEFAULT_QUEUE_SIZE: usize = 1024;
-
 //======================================================================================================================
 // Structures
 //======================================================================================================================
@@ -43,8 +40,7 @@ const DEFAULT_QUEUE_SIZE: usize = 1024;
 /// This data structure implements an unbounded asynchronous queue that is hooked into the Demikernel scheduler. On
 /// pop, if the queue is empty, the coroutine will yield until there is data to be read.
 pub struct AsyncQueue<T> {
-    // The `Saturating`` parameter ensures that new items are dropped when the queue is full.
-    queue: ArrayDeque<[T; DEFAULT_QUEUE_SIZE], Saturating>,
+    queue: VecDeque<T>,
     cond_var: SharedConditionVariable,
 }
 
@@ -57,9 +53,9 @@ pub struct SharedAsyncQueue<T>(SharedObject<AsyncQueue<T>>);
 impl<T> AsyncQueue<T> {
     /// This function allocates a shared async queue with a specified capacity.
     // TODO: Enforce capacity limit and do not let queue grow past that.
-    pub fn with_capacity(_size: usize) -> Self {
+    pub fn with_capacity(size: usize) -> Self {
         Self {
-            queue: ArrayDeque::new(),
+            queue: VecDeque::<T>::with_capacity(size),
             cond_var: SharedConditionVariable::default(),
         }
     }
@@ -67,12 +63,12 @@ impl<T> AsyncQueue<T> {
     /// Push to a async queue. Currently async queues are unbounded, so we can synchronously push to them but we will
     /// add bounds checking in the future.
     pub fn push(&mut self, item: T) {
-        let _ = self.queue.push_back(item);
+        self.queue.push_back(item);
         self.cond_var.signal();
     }
 
     pub fn push_front(&mut self, item: T) {
-        let _ = self.queue.push_front(item);
+        self.queue.push_front(item);
         self.cond_var.signal();
     }
 
@@ -134,7 +130,7 @@ impl<T> SharedAsyncQueue<T> {
 impl<T> Default for AsyncQueue<T> {
     fn default() -> Self {
         Self {
-            queue: ArrayDeque::new(),
+            queue: VecDeque::<T>::default(),
             cond_var: SharedConditionVariable::default(),
         }
     }

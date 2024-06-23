@@ -121,10 +121,12 @@ int __epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeou
 
                         if (queue_man_is_listen_fd(ev->sockqd))
                         {
+                            // printf("[epoll_wait] Calling __demi_accept\n");
                             assert(__demi_accept(&qt, ev->sockqd) == 0);
                         }
                         else
                         {
+                            // printf("[epoll_wait] Calling __demi_pop\n");
                             assert(__demi_pop(&qt, ev->sockqd) == 0);
                         }
                         ev->qt = qt;

@@ -54,10 +54,12 @@ static int __do_demi_epoll_ctl_add(int epfd, int fd, struct epoll_event *event)
 
                 if (queue_man_is_listen_fd(fd))
                 {
+                    // printf("[__do_demi_epoll_ctl_add] Calling __demi_accept\n");
                     assert(__demi_accept(&qt, fd) == 0);
                 }
                 else
                 {
+                    // printf("[__do_demi_epoll_ctl_add] Calling __demi_pop\n");
                     assert(__demi_pop(&qt, fd) == 0);
                 }
                 

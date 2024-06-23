@@ -80,7 +80,28 @@ thread_local! {
 
 #[allow(unused)]
 #[no_mangle]
-pub extern "C" fn demi_init(args: *const demi_args_t) -> c_int {
+pub extern "C" fn demi_init(argc: c_int, argv: *mut *mut c_char) -> c_int {
+    // For 'demi-libevent' we skip, because we previously initialized
+    {
+        let c_str: &CStr = unsafe { CStr::from_ptr(*argv.offset(0)) };
+        
+        let str_slice: &str = c_str.to_str().unwrap();
+        let str_buf: String = str_slice.to_owned();
+
+        if str_buf == "libevent" {
+            return 0;
+        }
+    }
+    // Check if Demikernel has already been initialized and return
+    let ret: i32 = DEMIKERNEL.with(|demikernel| match *demikernel.borrow() {
+        Some(_) => libc::EEXIST,
+        None => 0,
+    });
+    if ret != 0 {
+        error!("demi_init(): Demikernel is already initialized");
+        return ret;
+    }
+
     logging::initialize();
     trace!("demi_init()");
 
@@ -89,14 +110,40 @@ pub extern "C" fn demi_init(args: *const demi_args_t) -> c_int {
         Err(e) => panic!("{:?}", e),
     };
 
-    // Check if demikernel has already been initialized and return
-    let ret: i32 = DEMIKERNEL.with(|demikernel| match *demikernel.borrow() {
-        Some(_) => libc::EEXIST,
-        None => 0,
-    });
-    if ret != 0 {
-        error!("demi_init(): Demikernel is already initialized");
-        return ret;
+    if argc != 2 {
+        panic!("ERROR: argc < 2");
+    }
+
+    {
+        use std::ffi::{CStr, CString};
+
+        trace!("Iterating the 'argv' with 'argc'={:?}", argc);
+        for i in 0..argc {
+            let c_str: &CStr = unsafe {
+                CStr::from_ptr(*argv.offset(i as isize))
+            };
+            
+            let str_slice: &str = c_str.to_str().unwrap();
+            let str_buf: String = str_slice.to_owned();
+
+            trace!("argv[{:?}]: {}", i, str_buf);
+        }
+    }
+
+    // Initialize DPDK EAL.
+    let c_str: &CStr = unsafe { CStr::from_ptr(*argv.offset(1)) };
+    let str_buf: String = c_str.to_str().unwrap().to_owned();
+    let nr_workers: u16 = str_buf.parse::<u16>().unwrap();
+    
+    if nr_workers != 0 {
+        let rx_queues: u16 = nr_workers;
+        let tx_queues: u16 = nr_workers;
+        match LibOS::init(rx_queues, tx_queues) {
+            Ok(()) => (),
+            Err(e) => panic!("{:?}", e),
+        }
+
+        return 0;
     }
 
     // Parse arguments.
@@ -551,7 +598,7 @@ pub extern "C" fn demi_pop(qtok_out: *mut demi_qtoken_t, qd: c_int) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn demi_wait(qr_out: *mut demi_qresult_t, qt: demi_qtoken_t, timeout: *const libc::timespec) -> c_int {
-    trace!("demi_wait() {:?} {:?} {:?}", qr_out, qt, timeout);
+    // trace!("demi_wait() {:?} {:?} {:?}", qr_out, qt, timeout);
 
     // Check for invalid storage location for queue result.
     if qr_out.is_null() {
@@ -574,7 +621,7 @@ pub extern "C" fn demi_wait(qr_out: *mut demi_qresult_t, qt: demi_qtoken_t, time
             0
         },
         Err(e) => {
-            trace!("demi_wait() failed: {:?}", e);
+            // trace!("demi_wait() failed: {:?}", e);
             e.errno
         },
     });
@@ -597,14 +644,14 @@ pub extern "C" fn demi_wait_any(
     num_qts: c_int,
     timeout: *const libc::timespec,
 ) -> c_int {
-    trace!(
-        "demi_wait_any() {:?} {:?} {:?} {:?} {:?}",
-        qr_out,
-        ready_offset,
-        qts,
-        num_qts,
-        timeout
-    );
+    // trace!(
+    //     "demi_wait_any() {:?} {:?} {:?} {:?} {:?}",
+    //     qr_out,
+    //     ready_offset,
+    //     qts,
+    //     num_qts,
+    //     timeout
+    // );
 
     // Check for invalid storage location for queue result.
     if qr_out.is_null() {
@@ -638,7 +685,7 @@ pub extern "C" fn demi_wait_any(
             0
         },
         Err(e) => {
-            trace!("demi_wait_any() failed: {:?}", e);
+            // trace!("demi_wait_any() failed: {:?}", e);
             e.errno
         },
     });

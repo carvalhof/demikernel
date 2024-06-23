@@ -37,7 +37,7 @@ extern int __demi_setsockopt(int sockfd, int level, int optname,
         const void *optval, socklen_t optlen);
 extern int __demi_getpeername(int qd, struct sockaddr *addr, socklen_t *addrlen);
 
-extern int __init(void);
+extern int __init(int);
 extern int __socket(int domain, int type, int protocol);
 extern int __shutdown(int sockfd, int how);
 extern int __close(int sockfd);

@@ -27,7 +27,7 @@ use ::std::{
 
 /// This flag controls whether we actually use a mapping or just directly expose internal IDs.
 /// We should eventually set this using an environment variable.
-const DIRECT_MAPPING: bool = true;
+const DIRECT_MAPPING: bool = false;
 /// This flag controls how the ids are allocated, either randomly or in a Fibonacci sequence.
 #[cfg(debug_assertions)]
 const RANDOMIZE: bool = true;

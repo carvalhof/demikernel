@@ -17,7 +17,6 @@ use crate::{
 };
 use ::libc::EBADMSG;
 use ::std::{
-    convert::TryInto,
     io::{
         Cursor,
         Read,
@@ -34,7 +33,6 @@ pub struct TcpSegment {
     pub ipv4_hdr: Ipv4Header,
     pub tcp_hdr: TcpHeader,
     pub data: Option<DemiBuffer>,
-    pub body_size: usize,
     pub tx_checksum_offload: bool,
 }
 
@@ -44,14 +42,16 @@ impl PacketBuf for TcpSegment {
     }
 
     fn body_size(&self) -> usize {
-        self.body_size
+        match &self.data {
+            Some(buf) => buf.len(),
+            None => 0,
+        }
     }
 
     fn write_header(&self, buf: &mut [u8]) {
         let eth_hdr_size: usize = self.ethernet2_hdr.compute_size();
         let ipv4_hdr_size: usize = self.ipv4_hdr.compute_size();
         let tcp_hdr_size: usize = self.tcp_hdr.compute_size();
-        let headers_size: usize = self.header_size();
         let mut cur_pos: usize = 0;
 
         self.ethernet2_hdr
@@ -63,18 +63,23 @@ impl PacketBuf for TcpSegment {
             .serialize(&mut buf[cur_pos..(cur_pos + ipv4_hdr_size)], ipv4_payload_len);
         cur_pos += ipv4_hdr_size;
 
-        let (headers, payload) = buf.split_at_mut(headers_size);
-
+        let payload: &[u8] = match &self.data {
+            Some(buf) => &buf[..],
+            None => &[],
+        };
         self.tcp_hdr.serialize(
-            &mut headers[cur_pos..(cur_pos + tcp_hdr_size)],
+            &mut buf[cur_pos..(cur_pos + tcp_hdr_size)],
             &self.ipv4_hdr,
             payload,
             self.tx_checksum_offload,
         );
     }
 
-    fn take_body(&mut self) -> Option<DemiBuffer> {
-        self.data.take()
+    fn take_body(&self) -> Option<DemiBuffer> {
+        match &self.data {
+            Some(body) => Some(body.clone()),
+            None => None,
+        }
     }
 }
 

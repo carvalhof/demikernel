@@ -6,6 +6,8 @@
 
 #include "epoll.h"
 
+extern void queue_man_init_worker(void);
+
 extern void queue_man_init(void);
 extern int queue_man_query_fd(int fd);
 extern int queue_man_register_fd(int fd);

@@ -17,6 +17,7 @@ use crate::{
     pal::constants::SOMAXCONN,
     runtime::{
         fail::Fail,
+        memory::MemoryRuntime,
         network::socket::option::SocketOption,
         types::{
             demi_qresult_t,
@@ -259,7 +260,7 @@ impl NetworkLibOSWrapper {
     /// Waits for a pending I/O operation to complete or a timeout to expire.
     /// This is just a single-token convenience wrapper for wait_any().
     pub fn wait(&mut self, qt: QToken, timeout: Duration) -> Result<demi_qresult_t, Fail> {
-        trace!("wait(): qt={:?}, timeout={:?}", qt, timeout);
+        // trace!("wait(): qt={:?}, timeout={:?}", qt, timeout);
 
         // Put the QToken into a single element array.
         let qt_array: [QToken; 1] = [qt];
@@ -330,7 +331,8 @@ impl NetworkLibOSWrapper {
             #[cfg(feature = "catnip-libos")]
             // TODO: Move this over to the transport once we set that up.
             // FIXME: https://github.com/microsoft/demikernel/issues/1057
-            NetworkLibOSWrapper::Catnip(libos) => libos.sgaalloc(size),
+            // NetworkLibOSWrapper::Catnip(libos) => libos.sgaalloc(size),
+            NetworkLibOSWrapper::Catnip(libos) => libos.get_transport().sgaalloc(size),
             #[cfg(feature = "catloop-libos")]
             NetworkLibOSWrapper::Catloop(libos) => libos.sgaalloc(size),
         }

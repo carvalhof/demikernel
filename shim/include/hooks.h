@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 
 // Control-path hooks.
-extern int __init(void);
+extern int __init(int);
 extern int __socket(int domain, int type, int protocol);
 extern int __shutdown(int sockfd, int how);
 extern int __close(int sockfd);

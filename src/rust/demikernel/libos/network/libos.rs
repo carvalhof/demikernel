@@ -395,9 +395,11 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// coroutine that asynchronously runs the push and any synchronous multi-queue functionality before the push
     /// begins.
     pub fn push(&mut self, qd: QDesc, sga: &demi_sgarray_t) -> Result<QToken, Fail> {
-        let buf: DemiBuffer = unsafe {
-            let token: std::ptr::NonNull<u8> = std::ptr::NonNull::new_unchecked(sga.sga_buf as *mut u8);
-            DemiBuffer::from_raw(token)
+        let buf: DemiBuffer = self.transport.clone_sgarray(sga)?;
+        if buf.len() == 0 {
+            let cause: String = format!("zero-length buffer");
+            warn!("push(): {}", cause);
+            return Err(Fail::new(libc::EINVAL, &cause));
         };
 
         let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
@@ -414,7 +416,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// Asynchronous code to push [buf] to a SharedNetworkQueue and its underlying POSIX socket. This function returns a
     /// coroutine that runs asynchronously to push a queue and its underlying POSIX socket and performs any necessary
     /// multi-queue operations at the libOS-level after the push succeeds or fails.
-    async fn push_coroutine(self, qd: QDesc, buf: DemiBuffer) -> (QDesc, OperationResult) {
+    async fn push_coroutine(self, qd: QDesc, mut buf: DemiBuffer) -> (QDesc, OperationResult) {
         // Grab the queue, make sure it hasn't been closed in the meantime.
         // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
         // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
@@ -423,7 +425,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             Err(e) => return (qd, OperationResult::Failed(e)),
         };
         // Wait for push to complete.
-        match queue.push_coroutine(buf, None).await {
+        match queue.push_coroutine(&mut buf, None).await {
             Ok(()) => (qd, OperationResult::Push),
             Err(e) => {
                 warn!("push() qd={:?}: {:?}", qd, &e);
@@ -457,7 +459,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
     /// Asynchronous code to pushto [buf] to [remote] on a SharedNetworkQueue and its underlying POSIX socket. This function
     /// returns a coroutine that runs asynchronously to pushto a queue and its underlying POSIX socket and performs any
     /// necessary multi-queue operations at the libOS-level after the pushto succeeds or fails.
-    async fn pushto_coroutine(self, qd: QDesc, buf: DemiBuffer, remote: SocketAddr) -> (QDesc, OperationResult) {
+    async fn pushto_coroutine(self, qd: QDesc, mut buf: DemiBuffer, remote: SocketAddr) -> (QDesc, OperationResult) {
         // Grab the queue, make sure it hasn't been closed in the meantime.
         // This will bump the Rc refcount so the coroutine can have it's own reference to the shared queue data
         // structure and the SharedNetworkQueue will not be freed until this coroutine finishes.
@@ -466,7 +468,7 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             Err(e) => return (qd, OperationResult::Failed(e)),
         };
         // Wait for push to complete.
-        match queue.push_coroutine(buf, Some(remote)).await {
+        match queue.push_coroutine(&mut buf, Some(remote)).await {
             Ok(()) => (qd, OperationResult::Push),
             Err(e) => {
                 warn!("pushto() qd={:?}: {:?}", qd, &e);

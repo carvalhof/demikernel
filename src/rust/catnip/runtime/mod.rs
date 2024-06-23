@@ -54,6 +54,20 @@ use crate::{
             rte_eth_tx_burst,
             rte_mbuf,
             // rte_pktmbuf_chain,
+            rte_tcp_hdr,
+            rte_flow_attr,
+            rte_flow_error,
+            rte_flow_item,
+            rte_flow_action,
+            rte_flow_validate,
+            rte_flow_create,
+            rte_flow_action_queue,
+            rte_flow_item_type_RTE_FLOW_ITEM_TYPE_ETH,
+            rte_flow_item_type_RTE_FLOW_ITEM_TYPE_IPV4,
+            rte_flow_item_type_RTE_FLOW_ITEM_TYPE_TCP,
+            rte_flow_item_type_RTE_FLOW_ITEM_TYPE_END,
+            rte_flow_action_type_RTE_FLOW_ACTION_TYPE_END,
+            rte_flow_action_type_RTE_FLOW_ACTION_TYPE_QUEUE,
         },
         memory::DemiBuffer,
         network::{
@@ -93,6 +107,52 @@ static mut GLOBAL_LINK_ADDR: Option<Arc<Mutex<MacAddress>>> = None;
 static mut GLOBAL_MEMORY_MANAGER: Option<Arc<Mutex<Arc<MemoryManager>>>> = None;
 
 //======================================================================================================================
+// Flow affinity (DPDK)
+//======================================================================================================================
+
+fn flow_affinity(nr_queues: usize) {
+    use ::std::{
+        mem::zeroed,
+        os::raw::c_void,
+    };
+
+    unsafe {
+        let n: u16 = 128;
+        for i in 0..n {
+            let mut err: rte_flow_error = zeroed();
+
+            let mut attr: rte_flow_attr = zeroed();
+            attr.set_egress(0);
+            attr.set_ingress(1);
+
+            let mut pattern: Vec<rte_flow_item> = vec![zeroed(); 4];
+            pattern[0].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_ETH;
+            pattern[1].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_IPV4;
+            pattern[2].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_TCP;
+            let mut flow_tcp: rte_tcp_hdr = zeroed();
+            let mut flow_tcp_mask: rte_tcp_hdr = zeroed();
+            flow_tcp.src_port = u16::to_be(6000 + i);
+            flow_tcp_mask.src_port = u16::MAX;
+            pattern[2].spec = &mut flow_tcp as *mut _ as *mut c_void;
+            pattern[2].mask = &mut flow_tcp_mask as *mut _ as *mut c_void;
+            pattern[3].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_END;
+
+            let mut action: Vec<rte_flow_action> = vec![zeroed(); 2];
+            action[0].type_ = rte_flow_action_type_RTE_FLOW_ACTION_TYPE_QUEUE;
+            let mut queue_action: rte_flow_action_queue = zeroed();
+            queue_action.index = i % (nr_queues as u16);
+            action[0].conf = &mut queue_action as *mut _ as *mut c_void;
+            action[1].type_ = rte_flow_action_type_RTE_FLOW_ACTION_TYPE_END;
+
+            rte_flow_validate(0, &attr, pattern.as_ptr(), action.as_ptr(), &mut err);
+
+            rte_flow_create(0, &attr, pattern.as_ptr(), action.as_ptr(), &mut err);
+        }
+    }
+}
+
+
+//======================================================================================================================
 // Structures
 //======================================================================================================================
 
@@ -116,6 +176,7 @@ pub struct SharedDPDKRuntime(SharedObject<DPDKRuntime>);
 impl SharedDPDKRuntime {
     /// Initializes DPDK.
     pub fn initialize_dpdk(config: &Config) -> Result<(Arc<MemoryManager>, u16, MacAddress), Fail> {
+        error!("initialize_dpdk(): ");
         // std::env::set_var("MLX5_SHUT_UP_BF", "1");
         // std::env::set_var("MLX5_SINGLE_THREADED", "1");
         // std::env::set_var("MLX4_SINGLE_THREADED", "1");
@@ -187,8 +248,8 @@ impl SharedDPDKRuntime {
         tx_queues: u16,
         config: &Config,
     ) -> Result<(), Fail> {
-        let rx_ring_size: u16 = 256;
-        let tx_ring_size: u16 = 256;
+        let rx_ring_size: u16 = 2048;
+        let tx_ring_size: u16 = 2048;
 
         let dev_info: dpdk_rs::rte_eth_dev_info = unsafe {
             let mut d: MaybeUninit<dpdk_rs::rte_eth_dev_info> = MaybeUninit::zeroed();
@@ -300,6 +361,11 @@ impl SharedDPDKRuntime {
             }
         }
 
+        // Flow Affinity
+        {
+            flow_affinity(rx_queues as usize);
+        }
+
         Ok(())
     }
 
@@ -353,6 +419,7 @@ impl NetworkRuntime for SharedDPDKRuntime {
             )
         };
 
+        error!("Criando um novo LibOS com qid={:?}", queue_id);
         Ok(Self(SharedObject::<DPDKRuntime>::new(DPDKRuntime {
             mm,
             port_id,
@@ -362,13 +429,13 @@ impl NetworkRuntime for SharedDPDKRuntime {
         })))
     }
 
-    fn transmit(&mut self, mut buf: Box<dyn PacketBuf>) {
+    fn transmit(&mut self, buf: Box<dyn PacketBuf>) {
         let headers_size: usize = buf.header_size();
         debug_assert!(headers_size < u16::MAX as usize);
 
         let mut mbuf: DemiBuffer = match buf.take_body() {
             Some(mut body) => {
-                debug_assert_eq!(body.is_dpdk_allocated(), true);
+                // debug_assert_eq!(body.is_dpdk_allocated(), true);
                 match body.prepend(headers_size.try_into().unwrap()) {
                     Ok(()) => body,
                     Err(e) => panic!("failed to prepend mbuf: {:?}", e.cause),
@@ -407,7 +474,7 @@ impl NetworkRuntime for SharedDPDKRuntime {
         let nb_rx = unsafe { rte_eth_rx_burst(self.port_id, self.queue_id, packets.as_mut_ptr(), RECEIVE_BATCH_SIZE as u16) };
         assert!(nb_rx as usize <= RECEIVE_BATCH_SIZE);
 
-        {
+        if nb_rx != 0{
             for &packet in &packets[..nb_rx as usize] {
                 // Safety: `packet` is a valid pointer to a properly initialized `rte_mbuf` struct.
                 let buf: DemiBuffer = unsafe { DemiBuffer::from_mbuf(packet) };

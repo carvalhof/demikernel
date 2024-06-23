@@ -438,7 +438,7 @@ impl<N: NetworkRuntime> NetworkTransport for SharedInetStack<N> {
     async fn push(
         &mut self,
         sd: &mut Self::SocketDescriptor,
-        buf: DemiBuffer,
+        buf: &mut DemiBuffer,
         addr: Option<SocketAddr>,
     ) -> Result<(), Fail> {
         match sd {

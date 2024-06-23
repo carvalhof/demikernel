@@ -25,6 +25,13 @@
 #include <fcntl.h>
 #include <sched.h>
 
+#include <pthread.h>
+#include <limits.h>
+
+#include <rte_common.h>
+#include <rte_eal.h>
+#include <rte_lcore.h>
+
 #define INTERPOSE_CALL2(type, fn_libc, fn_demi, ...) \
     {                                                \
         init();                                      \
@@ -95,73 +102,54 @@ static int (*libc_epoll_create1)(int) = NULL;
 static int (*libc_epoll_ctl)(int, int, int, struct epoll_event *) = NULL;
 static int (*libc_epoll_wait)(int, struct epoll_event *, int, int) = NULL;
 
-static volatile uint8_t initialized_libc = 0;
-static volatile uint8_t in_init_libc = 0;
+static int (*libc_pthread_create)(pthread_t *, const pthread_attr_t *, void *(*) (void *), void *) = NULL;
 
-static volatile uint8_t initialized = 0;
-static volatile uint8_t in_init = 0;
+static int lcore_idx = 0;
+static bool initialized = false;
+static bool initialized_libc = false;
+static unsigned int *dpdk_lcores = NULL;
 
 static void init_libc(void)
 {
-    if (initialized_libc == 0)
-    {
+    assert((libc_socket = dlsym(RTLD_NEXT, "socket")) != NULL);
+    assert((libc_shutdown = dlsym(RTLD_NEXT, "shutdown")) != NULL);
+    assert((libc_bind = dlsym(RTLD_NEXT, "bind")) != NULL);
+    assert((libc_connect = dlsym(RTLD_NEXT, "connect")) != NULL);
+    assert((libc_fcntl = dlsym(RTLD_NEXT, "fcntl")) != NULL);
+    assert((libc_listen = dlsym(RTLD_NEXT, "listen")) != NULL);
+    assert((libc_accept4 = dlsym(RTLD_NEXT, "accept4")) != NULL);
+    assert((libc_accept = dlsym(RTLD_NEXT, "accept")) != NULL);
+    assert((libc_getsockopt = dlsym(RTLD_NEXT, "getsockopt")) != NULL);
+    assert((libc_setsockopt = dlsym(RTLD_NEXT, "setsockopt")) != NULL);
+    assert((libc_getsockname = dlsym(RTLD_NEXT, "getsockname")) != NULL);
+    assert((libc_getpeername = dlsym(RTLD_NEXT, "getpeername")) != NULL);
+    assert((libc_read = dlsym(RTLD_NEXT, "read")) != NULL);
+    assert((libc_recv = dlsym(RTLD_NEXT, "recv")) != NULL);
+    assert((libc_recvfrom = dlsym(RTLD_NEXT, "recvfrom")) != NULL);
+    assert((libc_recvmsg = dlsym(RTLD_NEXT, "recvmsg")) != NULL);
+    assert((libc_readv = dlsym(RTLD_NEXT, "readv")) != NULL);
+    assert((libc_pread = dlsym(RTLD_NEXT, "pread")) != NULL);
+    assert((libc_write = dlsym(RTLD_NEXT, "write")) != NULL);
+    assert((libc_send = dlsym(RTLD_NEXT, "send")) != NULL);
+    assert((libc_sendto = dlsym(RTLD_NEXT, "sendto")) != NULL);
+    assert((libc_sendmsg = dlsym(RTLD_NEXT, "sendmsg")) != NULL);
+    assert((libc_writev = dlsym(RTLD_NEXT, "writev")) != NULL);
+    assert((libc_pwrite = dlsym(RTLD_NEXT, "pwrite")) != NULL);
+    assert((libc_close = dlsym(RTLD_NEXT, "close")) != NULL);
+    assert((libc_epoll_create = dlsym(RTLD_NEXT, "epoll_create")) != NULL);
+    assert((libc_epoll_create1 = dlsym(RTLD_NEXT, "epoll_create1")) != NULL);
+    assert((libc_epoll_ctl = dlsym(RTLD_NEXT, "epoll_ctl")) != NULL);
+    assert((libc_epoll_wait = dlsym(RTLD_NEXT, "epoll_wait")) != NULL);
 
-        if (__sync_fetch_and_add(&in_init_libc, 1) == 0)
-        {
-            assert((libc_socket = dlsym(RTLD_NEXT, "socket")) != NULL);
-            assert((libc_shutdown = dlsym(RTLD_NEXT, "shutdown")) != NULL);
-            assert((libc_bind = dlsym(RTLD_NEXT, "bind")) != NULL);
-            assert((libc_connect = dlsym(RTLD_NEXT, "connect")) != NULL);
-            assert((libc_fcntl = dlsym(RTLD_NEXT, "fcntl")) != NULL);
-            assert((libc_listen = dlsym(RTLD_NEXT, "listen")) != NULL);
-            assert((libc_accept4 = dlsym(RTLD_NEXT, "accept4")) != NULL);
-            assert((libc_accept = dlsym(RTLD_NEXT, "accept")) != NULL);
-            assert((libc_getsockopt = dlsym(RTLD_NEXT, "getsockopt")) != NULL);
-            assert((libc_setsockopt = dlsym(RTLD_NEXT, "setsockopt")) != NULL);
-            assert((libc_getsockname = dlsym(RTLD_NEXT, "getsockname")) != NULL);
-            assert((libc_getpeername = dlsym(RTLD_NEXT, "getpeername")) != NULL);
-            assert((libc_read = dlsym(RTLD_NEXT, "read")) != NULL);
-            assert((libc_recv = dlsym(RTLD_NEXT, "recv")) != NULL);
-            assert((libc_recvfrom = dlsym(RTLD_NEXT, "recvfrom")) != NULL);
-            assert((libc_recvmsg = dlsym(RTLD_NEXT, "recvmsg")) != NULL);
-            assert((libc_readv = dlsym(RTLD_NEXT, "readv")) != NULL);
-            assert((libc_pread = dlsym(RTLD_NEXT, "pread")) != NULL);
-            assert((libc_write = dlsym(RTLD_NEXT, "write")) != NULL);
-            assert((libc_send = dlsym(RTLD_NEXT, "send")) != NULL);
-            assert((libc_sendto = dlsym(RTLD_NEXT, "sendto")) != NULL);
-            assert((libc_sendmsg = dlsym(RTLD_NEXT, "sendmsg")) != NULL);
-            assert((libc_writev = dlsym(RTLD_NEXT, "writev")) != NULL);
-            assert((libc_pwrite = dlsym(RTLD_NEXT, "pwrite")) != NULL);
-            assert((libc_close = dlsym(RTLD_NEXT, "close")) != NULL);
-            assert((libc_epoll_create = dlsym(RTLD_NEXT, "epoll_create")) != NULL);
-            assert((libc_epoll_create1 = dlsym(RTLD_NEXT, "epoll_create1")) != NULL);
-            assert((libc_epoll_ctl = dlsym(RTLD_NEXT, "epoll_ctl")) != NULL);
-            assert((libc_epoll_wait = dlsym(RTLD_NEXT, "epoll_wait")) != NULL);
-
-            __sync_fetch_and_sub(&in_init_libc, 1);
-            MEM_BARRIER();
-            initialized_libc = 1;
-        }
-        else
-        {
-            while (initialized_libc == 0)
-            {
-                sched_yield();
-            }
-            MEM_BARRIER();
-        }
-    }
+    assert((libc_pthread_create = dlsym(RTLD_NEXT, "pthread_create")) != NULL);
 }
 
 static void init(void)
 {
     if (initialized == 0)
     {
-        if (__sync_fetch_and_add(&in_init, 1) == 0)
-        {
-            int ret = __init();
-            if (ret != 0 && ret != EEXIST)
-                abort();
+        if (__init(0) != 0)
+            abort();
 
             __sync_fetch_and_sub(&in_init, 1);
             MEM_BARRIER();
@@ -190,7 +178,12 @@ int shutdown(int sockfd, int how)
 
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-    INTERPOSE_CALL(int, libc_bind, __bind, sockfd, addr, addrlen);
+    if (sockfd < 500)
+        return libc_bind(sockfd, addr, addrlen);
+
+    return __bind(sockfd, addr, addrlen);
+        
+    // INTERPOSE_CALL(int, libc_bind, __bind, sockfd, addr, addrlen);
 }
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
@@ -307,12 +300,21 @@ int fcntl(int fd, int cmd, ...)
 
 int listen(int sockfd, int backlog)
 {
-    INTERPOSE_CALL(int, libc_listen, __listen, sockfd, backlog);
+    if (sockfd < 500)
+        return libc_listen(sockfd, backlog);
+
+    return __listen(sockfd, backlog);
+
+    // INTERPOSE_CALL(int, libc_listen, __listen, sockfd, backlog);
 }
 
 int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags)
 {
-    INTERPOSE_CALL(int, libc_accept4, __accept4, sockfd, addr, addrlen, flags);
+    if (sockfd < 500)
+        return libc_accept4(sockfd, addr, addrlen, flags);
+
+    return __accept4(sockfd, addr, addrlen, flags);
+    // INTERPOSE_CALL(int, libc_accept4, __accept4, sockfd, addr, addrlen, flags);
 }
 
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
@@ -337,12 +339,20 @@ int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    INTERPOSE_CALL(int, libc_getpeername, __getpeername, sockfd, addr, addrlen);
+    //INTERPOSE_CALL(int, libc_getpeername, __getpeername, sockfd, addr, addrlen);
+    return 0;
 }
 
 ssize_t read(int sockfd, void *buf, size_t count)
 {
-    INTERPOSE_CALL(ssize_t, libc_read, __read, sockfd, buf, count);
+    // fprintf(stderr, "read no sock = %d com count=%d\n", sockfd, count);
+    // INTERPOSE_CALL(ssize_t, libc_read, __read, sockfd, buf, count);
+    if(sockfd < 500) {
+        if (!initialized_libc)
+            init_libc();
+        return libc_read(sockfd, buf, count);
+    }
+    return __read(sockfd, buf, count);
 }
 
 ssize_t recv(int sockfd, void *buf, size_t len, int flags)
@@ -382,7 +392,14 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags, const struct 
 
 ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
 {
-    INTERPOSE_CALL(ssize_t, libc_sendmsg, __sendmsg, sockfd, msg, flags);
+    // fprintf(stderr, "sendmsg no sock = %d\n", sockfd);
+    // INTERPOSE_CALL(ssize_t, libc_sendmsg, __sendmsg, sockfd, msg, flags);
+    if(sockfd < 500) {
+        if (!initialized_libc)
+            init_libc();
+        return libc_sendmsg(sockfd, msg, flags);
+    }
+    return __sendmsg(sockfd, msg, flags);
 }
 
 ssize_t writev(int sockfd, const struct iovec *iov, int iovcnt)
@@ -410,7 +427,7 @@ int epoll_create1(int flags)
 
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 {
-    bool reentrant = is_reentrant_demi_call();
+    bool reentrant = 0;//is_reentrant_demi_call();
 
     if (!initialized_libc)
         init_libc();
@@ -447,7 +464,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 
 int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 {
-    bool reentrant = is_reentrant_demi_call();
+    bool reentrant = 0;//is_reentrant_demi_call();
 
     if (!initialized_libc)
         init_libc();
@@ -527,4 +544,63 @@ int epoll_create(int size)
     queue_man_register_linux_epfd(linux_epfd, demikernel_epfd);
 
     return linux_epfd + EPOLL_MAX_FDS;
+}
+
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start_routine)(void *), void *arg) {
+    if(attr != NULL) {
+        long unsigned int stack_size;
+
+        pthread_attr_getstacksize(attr, &stack_size);
+        if (stack_size & 0x1 == 1) {
+            stack_size &= ~1;
+            pthread_attr_t modified_attr;
+            memcpy(&modified_attr, attr, sizeof(pthread_attr_t));
+            pthread_attr_setstacksize(&modified_attr, stack_size);
+
+            int ret = libc_pthread_create(thread, &modified_attr, start_routine, arg);
+
+            if(ret != 0) {
+                fprintf(stderr, "ERROR: %s\n", strerror(errno));
+                return EXIT_FAILURE;
+            }
+
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(dpdk_lcores[lcore_idx++], &cpuset);
+
+            if (pthread_setaffinity_np(*thread, sizeof(cpu_set_t), &cpuset) != 0) {
+                return EXIT_FAILURE;
+            }
+
+            pthread_attr_destroy(&modified_attr);
+
+            return ret;
+        }
+    }
+
+    return libc_pthread_create(thread, attr, start_routine, arg);
+}
+
+unsigned int sleep(unsigned int nr_workers) {
+    // This wrapper for calling demi_init.
+    initialized = true;
+
+    int ret = __init(nr_workers);
+
+    if(nr_workers != 0) {
+        int lcore_id = rte_get_next_lcore(rte_lcore_id(), 1, 0);
+
+        dpdk_lcores = (unsigned int*) malloc(nr_workers * sizeof(unsigned int));
+        if(!dpdk_lcores) {
+            fprintf(stderr, "ERROR on creating dpdk_lcores");
+            return EXIT_FAILURE;
+        }
+
+        for(int i = 0; i < nr_workers; i++) {
+            dpdk_lcores[i] = lcore_id;
+            lcore_id = rte_get_next_lcore(lcore_id, 1, 0);
+        }
+    }
+
+    return ret;
 }

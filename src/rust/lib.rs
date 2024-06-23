@@ -10,7 +10,7 @@
 #![feature(noop_waker)]
 #![feature(hash_extract_if)]
 
-pub mod collections;
+mod collections;
 mod pal;
 
 #[cfg(feature = "profiler")]

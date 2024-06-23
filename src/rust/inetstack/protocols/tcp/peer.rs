@@ -215,13 +215,11 @@ impl<N: NetworkRuntime> SharedTcpPeer<N> {
     }
 
     /// Pushes immediately to the socket and returns the result asynchronously.
-    pub async fn push(&self, socket: &mut SharedTcpSocket<N>, buf: DemiBuffer) -> Result<(), Fail> {
-        // // TODO: Remove this copy after merging with the transport trait.
-        // // Wait for push to complete.
-        // socket.push(buf.clone()).await?;
-        // buf.trim(buf.len())
-
-        socket.push(buf).await
+    pub async fn push(&self, socket: &mut SharedTcpSocket<N>, buf: &mut DemiBuffer) -> Result<(), Fail> {
+        // TODO: Remove this copy after merging with the transport trait.
+        // Wait for push to complete.
+        socket.push(buf.clone()).await?;
+        buf.trim(buf.len())
     }
 
     /// Sets up a coroutine for popping data from the socket.

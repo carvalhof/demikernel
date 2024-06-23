@@ -78,7 +78,7 @@ pub trait NetworkTransport: Clone + 'static + MemoryRuntime {
     fn push(
         &mut self,
         sd: &mut Self::SocketDescriptor,
-        buf: DemiBuffer,
+        buf: &mut DemiBuffer,
         addr: Option<SocketAddr>,
     ) -> impl std::future::Future<Output = Result<(), Fail>>;
 

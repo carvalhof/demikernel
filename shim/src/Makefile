@@ -14,7 +14,6 @@ all: all-libs
 
 all-libs:
 	mkdir -p $(LIBDIR)
-	$(CC) $(CFLAGS) $(SRC) -fPIC -shared -o $(LIBDIR)/$(SHIM_LIB) -L $(LIBDIR)/ -ldemikernel
-
+	$(CC) $(CFLAGS) $(SRC) -fPIC -shared -o $(LIBDIR)/$(SHIM_LIB) -L $(LIBDIR)/ -I/users/fabricio/include -L/users/fabricio/lib/x86_64-linux-gnu -ldemikernel
 clean:
 	rm -f $(LIBDIR)/$(SHIM_LIB)

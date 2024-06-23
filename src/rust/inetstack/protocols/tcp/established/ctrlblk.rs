@@ -839,10 +839,6 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         debug_assert!(header.ack);
 
         let sent_fin: bool = header.fin;
-        let body_size: usize = match &body {
-            Some(buf) => buf.len(),
-            None => 0,
-        };
 
         // Prepare description of TCP segment to send.
         // TODO: Change this to call lower levels to fill in their header information, handle routing, ARPing, etc.
@@ -851,7 +847,6 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             ipv4_hdr: Ipv4Header::new(self.local.ip().clone(), self.remote.ip().clone(), IpProtocol::TCP),
             tcp_hdr: header,
             data: body,
-            body_size,
             tx_checksum_offload: self.tcp_config.get_tx_checksum_offload(),
         };
 

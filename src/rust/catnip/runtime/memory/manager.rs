@@ -145,7 +145,8 @@ impl MemoryManager {
         }
 
         // First allocate the underlying DemiBuffer.
-        let buf: DemiBuffer = if size > self.config.get_inline_body_size() && size <= self.config.get_max_body_size() {
+        // let buf: DemiBuffer = if size > self.config.get_inline_body_size() && size <= self.config.get_max_body_size() {
+        let buf: DemiBuffer = if size <= self.config.get_max_body_size() {
             // Allocate a DPDK-managed buffer.
             let mbuf_ptr: *mut rte_mbuf = self.body_pool.alloc_mbuf(Some(size))?;
             // Safety: `mbuf_ptr` is a valid pointer to a properly initialized `rte_mbuf` struct.

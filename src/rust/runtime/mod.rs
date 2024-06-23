@@ -258,12 +258,12 @@ impl SharedDemiRuntime {
                 return Ok((i, *qt, qd, result));
             }
 
-            // // 2. Make sure these queue tokens all point to valid tasks.
-            // if !self.scheduler.is_valid_task(&TaskId::from(*qt)) {
-            //     let cause: String = format!("{:?} is not a valid queue token", qt);
-            //     warn!("wait_any: {}", cause);
-            //     return Err(Fail::new(libc::EINVAL, &cause));
-            // }
+            // 2. Make sure these queue tokens all point to valid tasks.
+            if !self.scheduler.is_valid_task(&TaskId::from(*qt)) {
+                let cause: String = format!("{:?} is not a valid queue token", qt);
+                warn!("wait_any: {}", cause);
+                return Err(Fail::new(libc::EINVAL, &cause));
+            }
         }
 
         // 3. None of the tasks have already completed, so start a timer and move the clock.

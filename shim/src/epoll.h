@@ -9,7 +9,7 @@
 
 #define EPOLL_MAX_FDS 1024
 #define EPOLL_MAX_FDS 1024
-#define MAX_EVENTS 512
+#define MAX_EVENTS 4
 
 struct demi_event
 {
@@ -19,6 +19,8 @@ struct demi_event
     demi_qresult_t qr;
     struct epoll_event ev;
 };
+
+extern void epoll_table_init_worker(void);
 
 extern void epoll_table_init(void);
 extern int epoll_table_alloc(void);

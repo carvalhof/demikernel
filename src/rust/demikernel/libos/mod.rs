@@ -106,6 +106,7 @@ impl LibOS {
     #[cfg(feature = "catnip-libos")]
     pub fn init(rx_queues: u16, tx_queues: u16) -> Result<(), Fail> {
         logging::initialize();
+        error!("catnip:init():");
         crate::runtime::libdpdk::load_mlx_driver();
 
         // Read in configuration file.
@@ -573,15 +574,15 @@ impl LibOS {
         let result: Result<QToken, Fail> = {
             timer!("demikernel::pop");
 
-            // Check if this is a fixed-size pop.
-            if let Some(size) = size {
-                // Check if size is valid.
-                if !((size > 0) && (size <= limits::POP_SIZE_MAX)) {
-                    let cause: String = format!("invalid pop size (size={:?})", size);
-                    error!("pop(): {:?}", &cause);
-                    return Err(Fail::new(libc::EINVAL, &cause));
-                }
-            }
+            // // Check if this is a fixed-size pop.
+            // if let Some(size) = size {
+            //     // Check if size is valid.
+            //     if !((size > 0) && (size <= limits::POP_SIZE_MAX)) {
+            //         let cause: String = format!("invalid pop size (size={:?})", size);
+            //         error!("pop(): {:?}", &cause);
+            //         return Err(Fail::new(libc::EINVAL, &cause));
+            //     }
+            // }
 
             match self {
                 #[cfg(any(

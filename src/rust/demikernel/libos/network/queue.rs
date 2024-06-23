@@ -297,7 +297,7 @@ impl<T: NetworkTransport> SharedNetworkQueue<T> {
 
     /// Asynchronously push data to the queue. This function contains all of the single-queue, asynchronous code
     /// necessary to push to the queue and any single-queue functionality after the push completes.
-    pub async fn push_coroutine(&mut self, buf: DemiBuffer, addr: Option<SocketAddr>) -> Result<(), Fail> {
+    pub async fn push_coroutine(&mut self, buf: &mut DemiBuffer, addr: Option<SocketAddr>) -> Result<(), Fail> {
         self.state_machine.may_push()?;
 
         let result = {
@@ -313,7 +313,9 @@ impl<T: NetworkTransport> SharedNetworkQueue<T> {
                 result = operation => result,
             }
         };
-
+        if result.is_ok() {
+            debug_assert_eq!(buf.len(), 0);
+        }
         result
     }
 
