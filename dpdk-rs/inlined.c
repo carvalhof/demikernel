@@ -96,7 +96,7 @@ int rte_eth_tx_offload_udp_cksum_()
 
 int rte_eth_rx_offload_udp_cksum_()
 {
-    return RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
+    return RTE_ETH_RX_OFFLOAD_UDP_CKSUM;
 }
 
 int rte_eth_tx_offload_multi_segs_()

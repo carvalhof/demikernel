@@ -365,12 +365,12 @@ extern "C" fn dispatcher_wrapper(data: *mut std::os::raw::c_void) -> i32 {
 
 fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
     let addr: SocketAddr = args.addr;
-    let dispatcher_id: usize = args.dispatcher_id;
+    let _dispatcher_id: usize = args.dispatcher_id;
     let to_workers: *mut DPDKRing2 = args.to_workers;
     let from_workers: *mut DPDKRing2 = args.from_workers;
 
     // Create the LibOS
-    let mut libos: LibOS = match LibOS::new(LibOSName::Catnip) {
+    let mut libos: LibOS = match LibOS::new(LibOSName::Catnip, None) {
         Ok(libos) => libos,
         Err(e) => panic!("failed to initialize libos: {:?}", e),
     };
@@ -405,8 +405,7 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
 
     loop {
         // Try to get an application reply
-        if let Some((qd, sga)) = unsafe { (*from_workers).dequeue::<(QDesc, demi_sgarray_t)>() } {
-            log::warn!("[d{:?}]: Got reply from worker.", dispatcher_id);
+        while let Some((qd, sga)) = unsafe { (*from_workers).dequeue::<(QDesc, demi_sgarray_t)>() } {
             // Push the reply.
             if let Ok(qt) = libos.push(qd, &sga) {
                 qts.push(qt);

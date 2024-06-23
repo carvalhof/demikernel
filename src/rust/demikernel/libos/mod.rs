@@ -556,7 +556,7 @@ impl LibOS {
             }
         };
 
-        self.poll();
+        // self.poll();
 
         result
     }
@@ -612,7 +612,7 @@ impl LibOS {
             }
         };
 
-        self.poll();
+        // self.poll();
 
         result
     }
