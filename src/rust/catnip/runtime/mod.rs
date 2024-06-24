@@ -397,7 +397,8 @@ impl NetworkRuntime for SharedDPDKRuntime {
                 }
             }
             None => {
-                let mut mbuf: DemiBuffer = match self.mm.alloc_header_mbuf(headers_size) {
+                let packet_size = if headers_size < MIN_PAYLOAD_SIZE { MIN_PAYLOAD_SIZE } else { headers_size };
+                let mut mbuf: DemiBuffer = match self.mm.alloc_header_mbuf(packet_size) {
                     Ok(mbuf) => mbuf,
                     Err(e) => panic!("failed to allocate mbuf: {:?}", e.cause),
                 };
