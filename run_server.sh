@@ -1,7 +1,7 @@
 #!/bin/bash
 
 LOCAL='192.168.100.1:12345'
-HOMEDIR='/home/fbc'
+HOMEDIR=$HOME
 
 if [ "$#" -ne 4 ]; then
 	echo "Illegal number of parameters"
@@ -30,7 +30,7 @@ if [ ${USE_PERF} -eq 1 ]; then
 
     echo 1 | sudo tee /proc/sys/kernel/nmi_watchdog
 else
-    taskset -c ${SERVER_CPUS} sudo HOME=${HOMEDIR} LD_LIBRARY_PATH=$HOME/lib/x86_64-linux-gnu make test-system-rust CONFIG_PATH=${HOME}/config.yaml.novo LIBOS=catnip TEST=server_dbARGS="${ARGS}" TIMEOUT=$TIMEOUT
+    taskset -c ${SERVER_CPUS} sudo HOME=${HOMEDIR} LD_LIBRARY_PATH=$HOME/lib/x86_64-linux-gnu make test-system-rust CONFIG_PATH=${HOME}/config.yaml.novo LIBOS=catnip TEST=server_db ARGS="${ARGS}" TIMEOUT=$TIMEOUT
     #taskset -c ${SERVER_CPUS} sudo HOME=${HOMEDIR} LD_LIBRARY_PATH=$HOME/lib/x86_64-linux-gnu make test-system-rust CONFIG_PATH=${HOME}/config.yaml.novo LIBOS=catnip TEST=server_db ARGS="${ARGS}" TIMEOUT=$TIMEOUT RUST_LOG=trace
 fi
 
