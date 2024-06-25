@@ -35,7 +35,7 @@ extern crate log;
 extern crate cfg_if;
 
 #[cfg(feature = "catnip-libos")]
-mod catnip;
+pub mod catnip;
 
 #[cfg(feature = "catpowder-libos")]
 mod catpowder;

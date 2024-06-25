@@ -21,7 +21,6 @@ use ::demikernel::{
     },
     runtime::libdpdk::{
         rte_lcore_count,
-        rte_get_timer_hz,
         rte_eal_mp_wait_lcore,
         rte_eal_remote_launch,
         rte_tcp_hdr,
@@ -39,14 +38,7 @@ use ::demikernel::{
         rte_flow_action_type_RTE_FLOW_ACTION_TYPE_END,
         rte_flow_action_type_RTE_FLOW_ACTION_TYPE_QUEUE,
     },
-};
-use ::rand::{
-    Rng,
-    SeedableRng,
-    rngs::{
-        self, 
-        StdRng,
-    },
+    catnip::runtime::memory::MemoryManager,
 };
 use ::std::{
     env,
@@ -103,8 +95,8 @@ fn flow_affinity(nr_queues: usize) {
             pattern[2].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_TCP;
             let mut flow_tcp: rte_tcp_hdr = zeroed();
             let mut flow_tcp_mask: rte_tcp_hdr = zeroed();
-            flow_tcp.src_port = u16::to_be(i + 1);
-            flow_tcp_mask.src_port = u16::MAX;
+            flow_tcp.dst_port = u16::to_be(12345 + i);
+            flow_tcp_mask.dst_port = u16::MAX;
             pattern[2].spec = &mut flow_tcp as *mut _ as *mut c_void;
             pattern[2].mask = &mut flow_tcp_mask as *mut _ as *mut c_void;
             pattern[3].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_END;
@@ -127,173 +119,11 @@ fn flow_affinity(nr_queues: usize) {
 // Structures
 //======================================================================================================================
 
-pub enum FakeWorker {
-    Null,
-    Sqrt,
-    Multiplication,
-    StridedMem(Vec<u8>, usize),
-    PointerChase(Vec<usize>),
-    RandomMem(Vec<u8>, Vec<usize>),
-    StreamingMem(Vec<u8>),
-}
-
-/// Associate Functions for FakeWorker
-impl FakeWorker {
-    pub fn create(spec: &str) -> Result<Self, &str> {
-        let mut rng: StdRng = rngs::StdRng::from_seed([0 as u8; 32]);
-
-        let tokens: Vec<&str> = spec.split(":").collect();
-        assert!(tokens.len() > 0);
-
-        match tokens[0] {
-            "null" => Ok(FakeWorker::Null),
-            "sqrt" => Ok(FakeWorker::Sqrt),
-            "multiplication" => Ok(FakeWorker::Multiplication),
-            "stridedmem" | "randmem" | "memstream" | "pointerchase" => {
-                assert!(tokens.len() > 1);
-                let size: usize = tokens[1].parse().unwrap();
-                let buf = (0..size).map(|_| rng.gen()).collect();
-                match tokens[0] {
-                    "stridedmem" => {
-                        assert!(tokens.len() > 2);
-                        let stride: usize = tokens[2].parse().unwrap();
-                        Ok(FakeWorker::StridedMem(buf, stride))
-                    }
-                    "pointerchase" => {
-                        assert!(tokens.len() > 2);
-                        let seed: u64 = tokens[2].parse().unwrap();
-                        let mut rng: StdRng = rngs::StdRng::from_seed([seed as u8; 32]);
-                        let nwords = size / 8;
-                        let buf: Vec<usize> = (0..nwords).map(|_| rng.gen::<usize>() % nwords).collect();
-                        Ok(FakeWorker::PointerChase(buf))
-                    }
-                    "randmem" => {
-                        let sched = (0..size).map(|_| rng.gen::<usize>() % size).collect();
-                        Ok(FakeWorker::RandomMem(buf, sched))
-                    }
-                    "memstream" => Ok(FakeWorker::StreamingMem(buf)),
-                    _ => unreachable!(),
-                }
-            }
-            _ => Err("bad fakework spec"),
-        }
-    }
-
-    fn warmup_cache(&self) {
-        match *self {
-            FakeWorker::RandomMem(ref buf, ref sched) => {
-                for i in 0..sched.len() {
-                    test::black_box::<u8>(buf[sched[i]]);
-                }
-            }
-            FakeWorker::StridedMem(ref buf, _stride) => {
-                for i in 0..buf.len() {
-                    test::black_box::<u8>(buf[i]);
-                }
-            }
-            FakeWorker::PointerChase(ref buf) => {
-                for i in 0..buf.len() {
-                    test::black_box::<usize>(buf[i]);
-                }
-            }
-            FakeWorker::StreamingMem(ref buf) => {
-                for i in 0..buf.len() {
-                    test::black_box::<u8>(buf[i]);
-                }
-            }
-            _ => (),
-        }
-    }
-
-    pub fn time(&self, iterations: u64, ticks_per_ns: f64) -> u64 {
-        let rounds: usize = 100;
-        let mut sum: f64 = 0.0;
-
-        for _ in 0..rounds {
-            let seed: u64 = rand::thread_rng().gen::<u64>();
-            self.warmup_cache();
-            let t0: u64 = unsafe { x86::time::rdtsc() };
-            self.work(iterations, seed);
-            let t1: u64 = unsafe { x86::time::rdtsc() };
-
-            sum += ((t1 - t0) as f64)/ticks_per_ns;
-        }
-
-        (sum/(rounds as f64)) as u64
-    }
-
-    pub fn calibrate(&self, target_ns: u64, ticks_per_ns: f64) -> u64 {
-        match *self {
-            _ => {
-                let mut iterations: u64 = 1;
-
-                while self.time(iterations, ticks_per_ns) < target_ns {
-                    iterations *= 2;
-                }
-                while self.time(iterations, ticks_per_ns) > target_ns {
-                    iterations -= 1;
-                }
-
-                println!("{} ns: {} iterations", target_ns, iterations);
-
-                iterations
-            }
-        }
-    }
-
-    pub fn work(&self, iters: u64, randomness: u64) {
-        match *self {
-            FakeWorker::Null => { },
-            FakeWorker::Sqrt => {
-                let k = 2350845.545;
-                for i in 0..iters {
-                    test::black_box(f64::sqrt(k * i as f64));
-                }
-            }
-            FakeWorker::Multiplication => {
-                let k = randomness;
-                for i in 0..iters {
-                    test::black_box(k * i);
-                }
-            }
-            FakeWorker::StridedMem(ref buf, stride) => {
-                let mut idx = randomness as usize % buf.len();
-                let blen = buf.len();
-                for _i in 0..iters as usize {
-                    test::black_box::<u8>(buf[idx]);
-                    idx += stride;
-                    if idx >= blen {
-                        idx -= blen;
-                    }
-                }
-            }
-            FakeWorker::RandomMem(ref buf, ref sched) => {
-                for i in 0..iters as usize {
-                    test::black_box::<u8>(buf[sched[i % sched.len()]]);
-                }
-            }
-            FakeWorker::PointerChase(ref buf) => {
-                let mut idx = randomness as usize % buf.len();
-                for _i in 0..iters {
-                    idx = buf[idx];
-                    test::black_box::<usize>(idx);
-                }
-            }
-            FakeWorker::StreamingMem(ref buf) => {
-                for _ in 0..iters {
-                    for i in (0..buf.len()).step_by(64) {
-                        test::black_box::<u8>(buf[i]);
-                    }
-                }
-            }
-        }
-    }
-}
-
 struct WorkerArg {
     worker_id: usize,
     dispatcher_id: usize,
     db: Arc<DB>,
+    mm: Arc<MemoryManager>,
     spinlock: *mut DPDKSpinLock,
     from_worker: *mut DPDKRing2,
     to_worker: *mut DPDKRing2,
@@ -321,10 +151,11 @@ extern "C" fn worker_wrapper(data: *mut std::os::raw::c_void) -> i32 {
 }
 
 fn worker_fn(args: &mut WorkerArg) -> ! {
-    let dispatcher_id: usize = args.dispatcher_id;
-    let worker_id: usize = args.worker_id;
+    let _dispatcher_id: usize = args.dispatcher_id;
+    let _worker_id: usize = args.worker_id;
     let to_worker: *mut DPDKRing2 = args.to_worker;
     let from_worker: *mut DPDKRing2 = args.from_worker;
+    let mm = &args.mm;
 
     // Get the Dabatase.
     let db = &args.db;
@@ -337,20 +168,48 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 
             {
                 let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                let bytes_read = unsafe { qr.qr_value.sga.sga_segs[0].sgaseg_len as usize };
+                let bytes_read = sga.sga_segs[0].sgaseg_len as usize;
                 let buffer: &[u8] = unsafe { std::slice::from_raw_parts(ptr, bytes_read) };
-                let bytes_read = unsafe{ qr.qr_value.sga.sga_segs[0].sgaseg_len as usize };
                 let command = String::from_utf8_lossy(&buffer[..bytes_read]);
                 let mut parts = command.split_whitespace();
                 if let Some(operation) = parts.next() {
                     match operation {
+                        "FLUSH" => {
+                            let mut keys_to_delete = vec![];
+                            for item in db.iterator(rocksdb::IteratorMode::Start) {
+                                match item {
+                                    Ok((key, _)) => keys_to_delete.push(key),
+                                    Err(_) => break,
+                                }
+                            }
+
+                            for key in keys_to_delete {
+                                db.delete(key).unwrap();
+                            }
+
+                            let response = { b"OK\n" };
+                            {
+                                let sga2: demi_sgarray_t = mm.alloc_sgarray(response.len()).unwrap();
+                            
+                                // Fill in scatter-gather array.
+                                let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+
+                                slice2.copy_from_slice(response);
+
+                                if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                                    panic!("Error: {:}", e);
+                                }
+                            }
+                        }
                         "SET" => {
                             if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
                                 let status = db.put_opt(key.as_bytes(), value.as_bytes(), &Default::default());
                                 let response = if status.is_ok() { b"OK\n" } else { b"NO\n" };
 
                                 {
-                                    let sga2: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
+                                    let sga2: demi_sgarray_t = mm.alloc_sgarray(response.len()).unwrap();
                                 
                                     // Fill in scatter-gather array.
                                     let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
@@ -384,7 +243,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                                 };
 
                                 {
-                                    let sga2: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
+                                    let sga2: demi_sgarray_t = mm.alloc_sgarray(response.len()).unwrap();
                                 
                                     // Fill in scatter-gather array.
                                     let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
@@ -400,47 +259,80 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                             }
                         }
                         "SCAN" => {
-                            if let (Some(start_key), Some(end_key)) = (parts.next(), parts.next()) {
-                                let mut response = vec![];
-                                let mut iter = db.iterator(IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward));
-                                while let Some(Ok((key, value))) = iter.next() {
-                                    if key > end_key.as_bytes().into() {
-                                        break;
+                            let response = match (parts.next(), parts.next()) {
+                                (Some(start_key), Some(end_key)) => {
+                                    let mut response = vec![];
+                                    let mut iter = db.iterator(IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward));
+                                    while let Some(Ok((key, value))) = iter.next() {
+                                        if key > end_key.as_bytes().into() {
+                                            break;
+                                        }
+                                        response.extend_from_slice(&key);
+                                        response.extend_from_slice(b" : ");
+                                        response.extend_from_slice(&value);
+                                        response.extend_from_slice(b"\n");
                                     }
-                                    response.extend_from_slice(&key);
-                                    response.extend_from_slice(b" : ");
-                                    response.extend_from_slice(&value);
-                                    response.extend_from_slice(b"\n");
+
+                                    response
                                 }
-                                let response = response.as_slice();
-                                // let _ = stream.write(&response);
-                                {
-                                    let sga2: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
-                                
-                                    // Fill in scatter-gather array.
-                                    let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
-                                    let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
-                                    let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
-
-                                    slice2.copy_from_slice(response);
-
-                                    if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
-                                        panic!("Error: {:}", e);
+                                _ => {
+                                    let mut response = vec![];
+                                    let mut iter = db.iterator(rocksdb::IteratorMode::Start);
+                                    while let Some(Ok((key, value))) = iter.next() {
+                                        response.extend_from_slice(&key);
+                                        response.extend_from_slice(b" : ");
+                                        response.extend_from_slice(&value);
+                                        response.extend_from_slice(b"\n");
                                     }
+
+                                    response
+                                }
+                            };
+
+                            {
+                                let size_in_bytes = (response.len() as u64).to_le_bytes();
+                                let sga2: demi_sgarray_t = mm.alloc_sgarray(8).unwrap();
+                                
+                                // Fill in scatter-gather array.
+                                let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+
+                                slice2.copy_from_slice(&size_in_bytes);
+
+                                if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                                    panic!("Error: {:}", e);
+                                }
+                            }
+
+
+                            let chunk_size = 1400;
+                            for chunk in response.chunks(chunk_size) {
+                                let sga2: demi_sgarray_t = mm.alloc_sgarray(chunk.len()).unwrap();
+                                
+                                // Fill in scatter-gather array.
+                                let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+
+                                slice2.copy_from_slice(chunk);
+
+                                if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                                    panic!("Error: {:}", e);
                                 }
                             }
                         }
                         _ => {
                             let response = b"UNKNOWN_COMMAND\n";
                             {
-                                let sga: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
-                            
+                                let sga2: demi_sgarray_t = mm.alloc_sgarray(response.len()).unwrap();
+                                
                                 // Fill in scatter-gather array.
-                                let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                                let len: usize = sga.sga_segs[0].sgaseg_len as usize;
-                                let slice: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+                                let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
 
-                                slice.copy_from_slice(response);
+                                slice2.copy_from_slice(response);
 
                                 if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
                                     panic!("Error: {:}", e);
@@ -468,8 +360,8 @@ extern "C" fn dispatcher_wrapper(data: *mut std::os::raw::c_void) -> i32 {
 }
 
 fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
-    let addr: SocketAddr = args.addr;
-    let _dispatcher_id: usize = args.dispatcher_id;
+    let mut addr: SocketAddr = args.addr;
+    let dispatcher_id: usize = args.dispatcher_id;
     let to_workers: *mut DPDKRing2 = args.to_workers;
     let from_workers: *mut DPDKRing2 = args.from_workers;
 
@@ -486,6 +378,7 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
     };
 
     // Bind the socket
+    addr.set_port(addr.port() + (dispatcher_id as u16));
     match libos.bind(sockqd, addr) {
         Ok(()) => (),
         Err(e) => panic!("bind failed: {:?}", e.cause),
@@ -511,9 +404,10 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
         // Try to get an application reply
         while let Some((qd, sga)) = unsafe { (*from_workers).dequeue::<(QDesc, demi_sgarray_t)>() } {
             // Push the reply.
-            if let Ok(qt) = libos.push(qd, &sga) {
-                qts.push(qt);
-            }
+            // if let Ok(qt) = libos.push(qd, &sga) {
+            //     qts.push(qt);
+            // }
+            libos.push(qd, &sga).unwrap();
         }
 
         // Wait for some event.
@@ -536,11 +430,11 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
                     }
                 }
                 demikernel::runtime::types::demi_opcode_t::DEMI_OPC_PUSH => {
-                    // Pop the next request.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
-                        qts.push(qt);
-                    }
+                    // // Pop the next request.
+                    // let qd: QDesc = qr.qr_qd.into();
+                    // if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
+                    //     qts.push(qt);
+                    // }
                 }
                 demikernel::runtime::types::demi_opcode_t::DEMI_OPC_POP => {
                     // Process the request.
@@ -549,6 +443,11 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
 
                     if let Err(e) = unsafe { (*to_workers).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga)) } {
                         panic!("Error: {:?}", e);
+                    }
+
+                    // Pop the next request.
+                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
+                        qts.push(qt);
                     }
                 }
                 _ => panic!("Not should be here"),
@@ -584,44 +483,12 @@ fn usage(program_name: &String) {
 pub fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() >= 3 {
-        if args[1] == "--calibrate" {
-            let fakework: FakeWorker = FakeWorker::create(args[2].as_str()).unwrap();
-
-            // Initialize DPDK EAL.
-            {
-                match LibOS::init(1, 1) {
-                    Ok(()) => (),
-                    Err(e) => anyhow::bail!("{:?}", e),
-                }
-            }
-
-            let ticks_per_ns: f64 = unsafe { rte_get_timer_hz() as f64 / 1000000000.0 }; 
-
-            let calibrated: f64 = if args.len() > 3 {
-                let target_ns: u64 = u64::from_str(&args[3])?;
-
-                fakework.calibrate(target_ns, ticks_per_ns) as f64
-            } else {
-                let target_ns: u64 = 1000;
-                let instructions: u64 = fakework.calibrate(target_ns, ticks_per_ns);
-
-                let calibrated: f64 = (target_ns as f64)/(instructions as f64);
-
-                calibrated
-            };
-
-            println!("\nCALIBRATION:{:?}\n", calibrated);
-        }
-    }
-
-    if args.len() >= 6 {
+    if args.len() >= 5 {
         if args[1] == "--server" {
             let addr: SocketAddr = SocketAddr::from_str(&args[2])?;
             let list_of_cores: Vec<&str> = args[3].split(":").collect();
             let nr_dispatchers: usize = usize::from_str(&args[4])?;
             let nr_workers: usize = usize::from_str(&args[5])?;
-            let spec: Arc<String> = Arc::new(args[6].clone());
 
             // Checking for Catnip LibOS.
             match LibOSName::from_env() {
@@ -635,14 +502,14 @@ pub fn main() -> Result<()> {
             }
 
             // Initialize DPDK EAL.
-            {
+            let mm = {
                 let rx_queues: u16 = nr_dispatchers as u16;
                 let tx_queues: u16 = nr_dispatchers as u16;
                 match LibOS::init(rx_queues, tx_queues) {
-                    Ok(()) => (),
+                    Ok(mm) => mm,
                     Err(e) => anyhow::bail!("{:?}", e),
                 }
-            }
+            };
             
             // Ensure the number of lcores.
             unsafe {
@@ -660,6 +527,20 @@ pub fn main() -> Result<()> {
             options.create_if_missing(true);
             let db = Arc::new(DB::open(&options, db_path)?);
 
+            {
+                let mut keys_to_delete = vec![];
+                for item in db.iterator(rocksdb::IteratorMode::Start) {
+                    match item {
+                        Ok((key, _)) => keys_to_delete.push(key),
+                        Err(_) => break,
+                    }
+                }
+
+                for key in keys_to_delete {
+                    db.delete(key).unwrap();
+                }
+            }
+
             let mut lcore_idx: usize = 1;
             let spinlock: *mut DPDKSpinLock = Box::into_raw(Box::new(DPDKSpinLock::new()));
 
@@ -676,6 +557,7 @@ pub fn main() -> Result<()> {
                         worker_id,
                         dispatcher_id,                       
                         db: db.clone(),
+                        mm: mm.clone(),
                         spinlock,
                         from_worker: from_workers,
                         to_worker: to_workers,

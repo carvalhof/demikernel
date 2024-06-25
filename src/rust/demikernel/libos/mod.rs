@@ -71,6 +71,7 @@ use ::std::{
     },
     time::Duration,
 };
+use crate::catnip::runtime::memory::MemoryManager;
 
 #[cfg(feature = "catloop-libos")]
 use crate::catloop::transport::SharedCatloopTransport;
@@ -112,7 +113,7 @@ pub enum LibOS {
 impl LibOS {
     /// Initializes the Catnip LibOS
     #[cfg(feature = "catnip-libos")]
-    pub fn init(rx_queues: u16, tx_queues: u16) -> Result<(), Fail> {
+    pub fn init(rx_queues: u16, tx_queues: u16) -> Result<Arc<MemoryManager>, Fail> {
         logging::initialize();
         crate::runtime::libdpdk::load_mlx_driver();
 
@@ -135,7 +136,7 @@ impl LibOS {
         // Initialize the DPDK port and queues.
         SharedDPDKRuntime::initialize_dpdk_port(
             port_id,
-            memory_manager,
+            memory_manager.clone(),
             rx_queues,
             tx_queues,
             &config,
@@ -147,7 +148,7 @@ impl LibOS {
             });
         }
 
-        Ok(())
+        Ok(memory_manager)
     }
     
     /// Instantiates a new LibOS.
