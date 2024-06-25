@@ -182,11 +182,11 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                     }
                 }
                 demi_opcode_t::DEMI_OPC_PUSH => {
-                    // Pop the next request.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
-                        qts.push(qt);
-                    }
+                    // // Pop the next request.
+                    // let qd: QDesc = qr.qr_qd.into();
+                    // if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
+                    //     qts.push(qt);
+                    // }
                 }
                 demi_opcode_t::DEMI_OPC_POP => {
                     // Process the request.
@@ -194,13 +194,43 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 
                     {
                         let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                        let bytes_read = unsafe { qr.qr_value.sga.sga_segs[0].sgaseg_len as usize };
+                        let bytes_read = sga.sga_segs[0].sgaseg_len as usize;
                         let buffer: &[u8] = unsafe { std::slice::from_raw_parts(ptr, bytes_read) };
-                        let bytes_read = unsafe{ qr.qr_value.sga.sga_segs[0].sgaseg_len as usize };
                         let command = String::from_utf8_lossy(&buffer[..bytes_read]);
                         let mut parts = command.split_whitespace();
                         if let Some(operation) = parts.next() {
                             match operation {
+                                "FLUSH" => {
+                                    let mut keys_to_delete = vec![];
+                                    for item in db.iterator(rocksdb::IteratorMode::Start) {
+                                        match item {
+                                            Ok((key, _)) => keys_to_delete.push(key),
+                                            Err(_) => break,
+                                        }
+                                    }
+
+                                    for key in keys_to_delete {
+                                        db.delete(key).unwrap();
+                                    }
+
+                                    let response = { b"OK\n" };
+                                    {
+                                        let sga2: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
+                                    
+                                        // Fill in scatter-gather array.
+                                        let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                        let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                        let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+
+                                        slice2.copy_from_slice(response);
+
+                                        let qd: QDesc = qr.qr_qd.into();
+                                        // if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                                        //     panic!("Error: {:}", e);
+                                        // }
+                                        libos.push(qd, &sga2).unwrap();
+                                    }
+                                }
                                 "SET" => {
                                     if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
                                         let status = db.put_opt(key.as_bytes(), value.as_bytes(), &Default::default());
@@ -217,9 +247,10 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                                             slice2.copy_from_slice(response);
 
                                             let qd: QDesc = qr.qr_qd.into();
-                                            if let Ok(qt) = libos.push(qd, &sga2) {
-                                                qts.push(qt);
-                                            }
+                                            // if let Ok(qt) = libos.push(qd, &sga2) {
+                                            //     qts.push(qt);
+                                            // }
+                                            libos.push(qd, &sga2).unwrap();
                                         }
                                         // let _ = stream.write(response);
                                     }
@@ -252,64 +283,108 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                                             slice2.copy_from_slice(response);
 
                                             let qd: QDesc = qr.qr_qd.into();
-                                            if let Ok(qt) = libos.push(qd, &sga2) {
-                                                qts.push(qt);
-                                            }
+                                            // if let Ok(qt) = libos.push(qd, &sga2) {
+                                            //     qts.push(qt);
+                                            // }
+                                            libos.push(qd, &sga2).unwrap();
                                         }
                                     }
                                 }
                                 "SCAN" => {
-                                    if let (Some(start_key), Some(end_key)) = (parts.next(), parts.next()) {
-                                        let mut response = vec![];
-                                        let mut iter = db.iterator(IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward));
-                                        while let Some(Ok((key, value))) = iter.next() {
-                                            if key > end_key.as_bytes().into() {
-                                                break;
+                                    let response = match (parts.next(), parts.next()) {
+                                        (Some(start_key), Some(end_key)) => {
+                                            let mut response = vec![];
+                                            let mut iter = db.iterator(IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward));
+                                            while let Some(Ok((key, value))) = iter.next() {
+                                                if key > end_key.as_bytes().into() {
+                                                    break;
+                                                }
+                                                response.extend_from_slice(&key);
+                                                response.extend_from_slice(b" : ");
+                                                response.extend_from_slice(&value);
+                                                response.extend_from_slice(b"\n");
                                             }
-                                            response.extend_from_slice(&key);
-                                            response.extend_from_slice(b" : ");
-                                            response.extend_from_slice(&value);
-                                            response.extend_from_slice(b"\n");
+        
+                                            response
                                         }
-                                        let response = response.as_slice();
-                                        // let _ = stream.write(&response);
-                                        {
-                                            let sga2: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
+                                        _ => {
+                                            let mut response = vec![];
+                                            let mut iter = db.iterator(rocksdb::IteratorMode::Start);
+                                            while let Some(Ok((key, value))) = iter.next() {
+                                                response.extend_from_slice(&key);
+                                                response.extend_from_slice(b" : ");
+                                                response.extend_from_slice(&value);
+                                                response.extend_from_slice(b"\n");
+                                            }
+        
+                                            response
+                                        }
+                                    };
+        
+                                    {
+                                        let size_in_bytes = (response.len() as u64).to_le_bytes();
+                                        let sga2: demi_sgarray_t = libos.sgaalloc(8).unwrap();
                                         
-                                            // Fill in scatter-gather array.
-                                            let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
-                                            let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
-                                            let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
-
-                                            slice2.copy_from_slice(response);
-
-                                            let qd: QDesc = qr.qr_qd.into();
-                                            if let Ok(qt) = libos.push(qd, &sga2) {
-                                                qts.push(qt);
-                                            }
-                                        }
+                                        // Fill in scatter-gather array.
+                                        let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                        let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                        let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+        
+                                        slice2.copy_from_slice(&size_in_bytes);
+        
+                                        let qd: QDesc = qr.qr_qd.into();
+                                        // if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                                        //     panic!("Error: {:}", e);
+                                        // }
+                                        libos.push(qd, &sga2).unwrap();
+                                    }
+        
+        
+                                    let chunk_size = 1400;
+                                    for chunk in response.chunks(chunk_size) {
+                                        let sga2: demi_sgarray_t = libos.sgaalloc(chunk.len()).unwrap();
+                                        
+                                        // Fill in scatter-gather array.
+                                        let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                        let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                        let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+        
+                                        slice2.copy_from_slice(chunk);
+        
+                                        let qd: QDesc = qr.qr_qd.into();
+                                        // if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                                        //     panic!("Error: {:}", e);
+                                        // }
+                                        libos.push(qd, &sga2).unwrap();
                                     }
                                 }
                                 _ => {
                                     let response = b"UNKNOWN_COMMAND\n";
                                     {
-                                        let sga: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
+                                        let sga2: demi_sgarray_t = libos.sgaalloc(response.len()).unwrap();
                                     
                                         // Fill in scatter-gather array.
-                                        let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                                        let len: usize = sga.sga_segs[0].sgaseg_len as usize;
-                                        let slice: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+                                        let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                                        let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                                        let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
 
-                                        slice.copy_from_slice(response);
+                                        slice2.copy_from_slice(response);
 
                                         let qd: QDesc = qr.qr_qd.into();
-                                        if let Ok(qt) = libos.push(qd, &sga) {
-                                            qts.push(qt);
-                                        }
+                                        // if let Ok(qt) = libos.push(qd, &sga) {
+                                        //     qts.push(qt);
+                                        // }
+                                        libos.push(qd, &sga2).unwrap();
                                     }
                                 }
                             }
                         }
+                    }
+
+                    // Pop the next request.
+                    let qd: QDesc = qr.qr_qd.into();
+                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
+                        qts.push(qt);
                     }
 
                     // // Push the reply.
@@ -317,6 +392,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                     // if let Ok(qt) = libos.push(qd, &sga) {
                     //     qts.push(qt);
                     // }
+                    
                 }
                 _ => {
                     panic!("Should not be here.")
@@ -376,6 +452,20 @@ pub fn main() -> Result<()> {
             let mut options = Options::default();
             options.create_if_missing(true);
             let db = Arc::new(DB::open(&options, db_path)?);
+
+            {
+                let mut keys_to_delete = vec![];
+                for item in db.iterator(rocksdb::IteratorMode::Start) {
+                    match item {
+                        Ok((key, _)) => keys_to_delete.push(key),
+                        Err(_) => break,
+                    }
+                }
+
+                for key in keys_to_delete {
+                    db.delete(key).unwrap();
+                }
+            }
 
             let mut lcore_idx: usize = 1;
             let spinlock: *mut DPDKSpinLock = Box::into_raw(Box::new(DPDKSpinLock::new()));

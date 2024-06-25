@@ -444,15 +444,19 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
             return Err(Fail::new(libc::EINVAL, "zero-length buffer"));
         }
 
-        let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
-        let coroutine_constructor = || -> Result<QToken, Fail> {
-            let coroutine = Box::pin(self.clone().pushto_coroutine(qd, buf, remote).fuse());
-            self.runtime
-                .clone()
-                .insert_io_coroutine("NetworkLibOS::pushto", coroutine)
-        };
+        // let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
+        // let coroutine_constructor = || -> Result<QToken, Fail> {
+        //     let coroutine = Box::pin(self.clone().pushto_coroutine(qd, buf, remote).fuse());
+        //     self.runtime
+        //         .clone()
+        //         .insert_io_coroutine("NetworkLibOS::pushto", coroutine)
+        // };
 
-        queue.push(coroutine_constructor)
+        // queue.push(coroutine_constructor)
+
+        let buf_ptr = buf.into_mbuf().unwrap();
+        unsafe { (*(*cb).aux_push_queue).enqueue(buf_ptr).unwrap() };
+        Ok(0.into())
     }
 
     /// Asynchronous code to pushto [buf] to [remote] on a SharedNetworkQueue and its underlying POSIX socket. This function
