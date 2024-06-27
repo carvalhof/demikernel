@@ -179,6 +179,11 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                     if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
                         qts.push(qt);
                     }
+
+                    // Accept incoming connection.
+                    if let Ok(qt) = libos.accept(sockqd) {
+                        qts.push(qt);
+                    }
                 }
                 demi_opcode_t::DEMI_OPC_POP => {
                     // Process the request.
