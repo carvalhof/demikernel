@@ -170,7 +170,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
             let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
             let bytes_read = sga.sga_segs[0].sgaseg_len as usize;
             let buffer: &[u8] = unsafe { std::slice::from_raw_parts(ptr, bytes_read) };
-            let command = String::from_utf8_lossy(&buffer[..bytes_read]);
+            let command = String::from_utf8_lossy(&buffer[16..bytes_read]);
             let mut parts = command.split_whitespace();
             if let Some(operation) = parts.next() {
                 let response: Vec<u8> = match operation {
@@ -252,21 +252,21 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                             response.append(&mut b"EMPTY\n".to_vec());
                         }
 
-                        let size_in_bytes: [u8; 8] = (response.len() as u64).to_le_bytes();
-                        let sga2: demi_sgarray_t = mm.alloc_sgarray(8).unwrap();
+                        // let size_in_bytes: [u8; 8] = (response.len() as u64).to_le_bytes();
+                        // let sga2: demi_sgarray_t = mm.alloc_sgarray(8).unwrap();
 
-                        // Fill in scatter-gather array.
-                        let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
-                        let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
-                        let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+                        // // Fill in scatter-gather array.
+                        // let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                        // let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                        // let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
 
-                        // Copy the size.
-                        slice2.copy_from_slice(&size_in_bytes);
+                        // // Copy the size.
+                        // slice2.copy_from_slice(&size_in_bytes);
 
-                        // Send the size.
-                        if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
-                            panic!("Error: {:}", e);
-                        }
+                        // // Send the size.
+                        // if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                        //     panic!("Error: {:}", e);
+                        // }
 
                         response
                     }
@@ -277,20 +277,24 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 
                 let chunk_size = 1400;
                 for chunk in response.chunks(chunk_size) {
-                    let sga2: demi_sgarray_t = mm.alloc_sgarray(chunk.len()).unwrap();
+                    let sga2: demi_sgarray_t = mm.alloc_sgarray(16+chunk.len()).unwrap();
                     
                     // Fill in scatter-gather array.
                     let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
                     let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
                     let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
 
+                    // Copy the Timestamp.
+                    slice2[0..16].copy_from_slice(&buffer[0..16]);
+
                     // Copy the reply.
-                    slice2.copy_from_slice(chunk);
+                    slice2[16..].copy_from_slice(chunk);
 
                     // Send the reply.
                     if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
                         panic!("Error: {:}", e);
                     }
+                    break;
                 }
             }
         }
