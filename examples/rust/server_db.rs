@@ -97,7 +97,7 @@ fn flow_affinity(nr_queues: usize) {
             let mut flow_tcp_mask: rte_tcp_hdr = zeroed();
             // flow_tcp.dst_port = u16::to_be(12345 + i);
             // flow_tcp_mask.dst_port = u16::MAX;
-            flow_tcp.src_port = u16::to_be(1 + i);
+            flow_tcp.src_port = u16::to_be(i + 1);
             flow_tcp_mask.src_port = u16::MAX;
             pattern[2].spec = &mut flow_tcp as *mut _ as *mut c_void;
             pattern[2].mask = &mut flow_tcp_mask as *mut _ as *mut c_void;
@@ -157,7 +157,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
     let _worker_id: usize = args.worker_id;
     let to_worker: *mut DPDKRing2 = args.to_worker;
     let from_worker: *mut DPDKRing2 = args.from_worker;
-    let mm = &args.mm;
+    let _mm = &args.mm;
 
     // Get the Dabatase.
     let db = &args.db;
@@ -171,7 +171,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 
             let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
             let bytes_read = sga.sga_segs[0].sgaseg_len as usize;
-            let buffer: &[u8] = unsafe { std::slice::from_raw_parts(ptr, bytes_read) };
+            let buffer: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr, bytes_read) };
             let command = String::from_utf8_lossy(&buffer[16..bytes_read]);
             let mut parts = command.split_whitespace();
             if let Some(operation) = parts.next() {
@@ -276,28 +276,36 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                         b"UNKNOWN_COMMAND\n".to_vec()
                     }
                 };
+                let available_space = buffer.len() - 16;
+                let copy_length = response.len().min(available_space);
 
-                let chunk_size = 1400;
-                for chunk in response.chunks(chunk_size) {
-                    let sga2: demi_sgarray_t = mm.alloc_sgarray(16+chunk.len()).unwrap();
-                    
-                    // Fill in scatter-gather array.
-                    let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
-                    let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
-                    let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
-
-                    // Copy the Timestamp.
-                    slice2[0..16].copy_from_slice(&buffer[0..16]);
-
-                    // Copy the reply.
-                    slice2[16..].copy_from_slice(chunk);
-
-                    // Send the reply.
-                    if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
-                        panic!("Error: {:}", e);
-                    }
-                    break;
+                buffer[16..(16 + copy_length)].copy_from_slice(&response[..copy_length]);
+                // Send the reply.
+                if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga)) } {
+                    panic!("Error: {:}", e);
                 }
+
+                // let chunk_size = 1400;
+                // for chunk in response.chunks(chunk_size) {
+                //     let sga2: demi_sgarray_t = mm.alloc_sgarray(16+chunk.len()).unwrap();
+                    
+                //     // Fill in scatter-gather array.
+                //     let ptr2: *mut u8 = sga2.sga_segs[0].sgaseg_buf as *mut u8;
+                //     let len2: usize = sga2.sga_segs[0].sgaseg_len as usize;
+                //     let slice2: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(ptr2, len2) };
+
+                //     // Copy the Timestamp.
+                //     slice2[0..16].copy_from_slice(&buffer[0..16]);
+
+                //     // Copy the reply.
+                //     slice2[16..].copy_from_slice(chunk);
+
+                //     // Send the reply.
+                //     if let Err(e) = unsafe { (*from_worker).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga2)) } {
+                //         panic!("Error: {:}", e);
+                //     }
+                //     break;
+                // }
             }
         }
     }
