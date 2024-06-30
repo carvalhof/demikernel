@@ -86,8 +86,8 @@ fn flow_affinity(nr_queues: usize) {
             pattern[2].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_TCP;
             let mut flow_tcp: rte_tcp_hdr = zeroed();
             let mut flow_tcp_mask: rte_tcp_hdr = zeroed();
-            flow_tcp.dst_port = u16::to_be(12345 + i);
-            flow_tcp_mask.dst_port = u16::MAX;
+            flow_tcp.src_port = u16::to_be(1 + i);
+            flow_tcp_mask.src_port = u16::MAX;
             pattern[2].spec = &mut flow_tcp as *mut _ as *mut c_void;
             pattern[2].mask = &mut flow_tcp_mask as *mut _ as *mut c_void;
             pattern[3].type_ = rte_flow_item_type_RTE_FLOW_ITEM_TYPE_END;
