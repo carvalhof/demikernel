@@ -444,7 +444,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         let cb: *mut SharedControlBlock<N> = self as *mut Self as *mut SharedControlBlock<N>;
         // Normal data processing in the Established state.
         unsafe { loop {
-            while let Some(item) = (*(*cb).aux_push_queue).dequeue() {
+            if let Some(item) = (*(*cb).aux_push_queue).dequeue() {
                 let buf: DemiBuffer = DemiBuffer::from_mbuf(item);
                 let t = self.clone();
                 (*cb).sender.send(buf, t).unwrap();
