@@ -407,9 +407,7 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
         // Try to get an application reply
         while let Some((qd, sga)) = unsafe { (*from_workers).dequeue::<(QDesc, demi_sgarray_t)>() } {
             // Push the reply.
-            if let Ok(qt) = libos.push(qd, &sga) {
-                qts.push(qt);
-            }
+            let Ok(qt) = libos.push(qd, &sga).unwrap();
         }
 
         // Wait for some event.
@@ -431,13 +429,6 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
                         qts.push(qt);
                     }
                 }
-                demikernel::runtime::types::demi_opcode_t::DEMI_OPC_PUSH => {
-                    // Pop the next request.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
-                        qts.push(qt);
-                    }
-                }
                 demikernel::runtime::types::demi_opcode_t::DEMI_OPC_POP => {
                     // Process the request.
                     let qd: QDesc = qr.qr_qd.into();
@@ -445,6 +436,11 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
 
                     if let Err(e) = unsafe { (*to_workers).enqueue::<(QDesc, demi_sgarray_t)>((qd, sga)) } {
                         panic!("Error: {:?}", e);
+                    }
+
+                    // Pop the next request.
+                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
+                        qts.push(qt);
                     }
                 }
                 _ => panic!("Not should be here"),
