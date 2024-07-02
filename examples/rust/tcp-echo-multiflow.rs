@@ -407,7 +407,7 @@ fn dispatcher_fn(args: &mut DispatcherArg) -> ! {
         // Try to get an application reply
         while let Some((qd, sga)) = unsafe { (*from_workers).dequeue::<(QDesc, demi_sgarray_t)>() } {
             // Push the reply.
-            let Ok(qt) = libos.push(qd, &sga).unwrap();
+            libos.push(qd, &sga).unwrap();
         }
 
         // Wait for some event.
