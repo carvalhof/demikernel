@@ -461,7 +461,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
 
                     match self.process_packet(header, data) {
                         Ok(()) => (),
-                        Err(e) => panic!("Dropped incoming packet: {:?}", e),
+                        Err(e) => warn!("Dropped incoming packet: {:?}", e),
                     };
                 }
             
@@ -484,7 +484,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
 
                 match self.process_packet(header, data) {
                     Ok(()) => (),
-                    Err(e) => panic!("Dropped incoming packet: {:?}", e),
+                    Err(e) => warn!("Dropped incoming packet: {:?}", e),
                 };
             }
 

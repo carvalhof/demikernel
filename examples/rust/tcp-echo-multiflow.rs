@@ -367,13 +367,6 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                         qts.push(qt);
                     }
                 }
-                demikernel::runtime::types::demi_opcode_t::DEMI_OPC_PUSH => {
-                    // Pop the next request.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
-                        qts.push(qt);
-                    }
-                }
                 demikernel::runtime::types::demi_opcode_t::DEMI_OPC_POP => {
                     // Process the request.
                     let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
@@ -388,10 +381,12 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
 
                     // Push the reply.
                     let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.push(qd, &sga) {
+                    libos.push(qd, &sga).unwrap();
+                    
+                    // Pop the next request.
+                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
                         qts.push(qt);
                     }
-                    
                 }
                 _ => panic!("Not should be here"),
             }
@@ -409,9 +404,7 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
                 }
 
                 // Push the reply.
-                if let Ok(_) = libos.push_steal(cb, &sga) {
-                    log::warn!("[w{:?}]: Push (stole) DONE.", worker_id);
-                }
+                libos.push_steal(cb, &sga).unwrap();
             }
         }
     }
