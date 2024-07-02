@@ -1,7 +1,7 @@
 #!/bin/bash
 
 LOCAL='192.168.100.1:12345'
-HOMEDIR='/home/fbc'
+HOMEDIR=$HOME
 
 if [ "$#" -ne 4 ]; then
 	echo "Illegal number of parameters"
