@@ -82,14 +82,17 @@ impl DPDKRing3 {
         }
     }
 
-    pub fn peek(&self, counter: usize) -> Option<*mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::catnip::runtime::SharedDPDKRuntime>> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn peek(&self, idx: usize) -> Option<*mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::catnip::runtime::SharedDPDKRuntime>> {
         unsafe {
             if self.array.is_null() || self.len == 0 {
                 return None
             }
     
-            let i: isize = (counter % self.len) as isize;
-            Some(*self.array.offset(i))
+            Some(*self.array.offset(idx as isize))
         }
     }
 }

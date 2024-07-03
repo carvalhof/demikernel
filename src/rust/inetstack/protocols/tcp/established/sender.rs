@@ -205,7 +205,7 @@ impl Sender {
             let win_sz: u32 = self.send_window.get();
 
             if win_sz > 0 && win_sz >= in_flight_after_send && effective_cwnd >= in_flight_after_send {
-                if let Some(remote_link_addr) = cb.arp().try_query(cb.get_remote().ip().clone()) {
+                // if let Some(remote_link_addr) = cb.arp().try_query(cb.get_remote().ip().clone()) {
                     // This hook is primarily intended to record the last time we sent data, so we can later tell if
                     // the connection has been idle.
                     let rto: Duration = cb.rto();
@@ -223,7 +223,7 @@ impl Sender {
                         header.psh = true;
                     }
                     trace!("Send immediate");
-                    cb.emit(header, Some(buf.clone()), remote_link_addr);
+                    cb.emit(header, Some(buf.clone()), cb.get_remote_link_addr());
 
                     // Update SND.NXT.
                     self.send_next.modify(|s| s + SeqNumber::from(buf_len));
@@ -245,9 +245,9 @@ impl Sender {
                     }
 
                     return Ok(());
-                } else {
-                    warn!("no ARP cache entry for send");
-                }
+                // } else {
+                //     warn!("no ARP cache entry for send");
+                // }
             }
         }
 

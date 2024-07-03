@@ -363,63 +363,27 @@ fn worker_fn(args: &mut WorkerArg) -> ! {
             // Parse the result.
             match qr.qr_opcode {
                 demikernel::runtime::types::demi_opcode_t::DEMI_OPC_ACCEPT => {
-                    // Pop the first request.   
-                    let qd: QDesc = unsafe { qr.qr_value.ares.qd.into() };
-                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
-                        qts.push(qt);
-                    }
-
                     // Accept a new incoming connection.
                     if let Ok(qt) = libos.accept(libos.get_qd()) {
                         qts.push(qt);
                     }
                 }
-                demikernel::runtime::types::demi_opcode_t::DEMI_OPC_PUSH => {
-                    // Pop the next request.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.pop(qd, Some(REQUEST_SIZE)) {
-                        qts.push(qt);
-                    }
-                }
-                demikernel::runtime::types::demi_opcode_t::DEMI_OPC_POP => {
-                    // Process the request.
-                    let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
-
-                    let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                    unsafe {
-                        let iterations: u64 = *((ptr.offset(32)) as *mut u64);
-                        let randomness: u64 = *((ptr.offset(40)) as *mut u64);
-                        *((ptr.offset(24)) as *mut u64) = worker_id as u64;
-                        fakework.work(iterations, randomness);
-                    }
-
-                    // Push the reply.
-                    let qd: QDesc = qr.qr_qd.into();
-                    if let Ok(qt) = libos.push(qd, &sga) {
-                        qts.push(qt);
-                    }
-                    
-                }
                 _ => panic!("Not should be here"),
             }
-        } else {
-            if let Some(qr) = libos.secondary_wait() {
-
-                let cb = qr.qr_cb;
-                let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
-                let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
-                unsafe {
-                    let iterations: u64 = *((ptr.offset(32)) as *mut u64);
-                    let randomness: u64 = *((ptr.offset(40)) as *mut u64);
-                    *((ptr.offset(24)) as *mut u64) = worker_id as u64;
-                    fakework.work(iterations, randomness);
-                }
-
-                // Push the reply.
-                if let Ok(_) = libos.secondary_push(cb, &sga) {
-                    log::warn!("[w{:?}]: Push (stole) DONE.", worker_id);
-                }
+        }
+        if let Some(qr) = libos.secondary_wait() {
+            let cb = qr.qr_cb;
+            let sga: demi_sgarray_t = unsafe { qr.qr_value.sga };
+            let ptr: *mut u8 = sga.sga_segs[0].sgaseg_buf as *mut u8;
+            unsafe {
+                let iterations: u64 = *((ptr.offset(32)) as *mut u64);
+                let randomness: u64 = *((ptr.offset(40)) as *mut u64);
+                *((ptr.offset(24)) as *mut u64) = worker_id as u64;
+                fakework.work(iterations, randomness);
             }
+
+            // Push the reply.
+            libos.secondary_push(cb, &sga).unwrap();
         }
     }
 }
