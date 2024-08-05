@@ -189,6 +189,7 @@ pub struct ControlBlock<N: NetworkRuntime> {
     #[allow(unused)]
     runtime: SharedDemiRuntime,
     local_link_addr: MacAddress,
+    remote_link_addr: MacAddress,
     tcp_config: TcpConfig,
     socket_options: TcpSocketOptions,
 
@@ -262,6 +263,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         runtime: SharedDemiRuntime,
         transport: N,
         local_link_addr: MacAddress,
+        remote_link_addr: MacAddress,
         tcp_config: TcpConfig,
         default_socket_options: TcpSocketOptions,
         arp: SharedArpPeer<N>,
@@ -289,6 +291,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             runtime,
             transport,
             local_link_addr,
+            remote_link_addr,
             tcp_config,
             socket_options: default_socket_options,
             arp,
@@ -319,6 +322,10 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
 
     pub fn get_remote(&self) -> SocketAddrV4 {
         self.remote
+    }
+
+    pub fn get_remote_link_addr(&self) -> MacAddress {
+        self.remote_link_addr
     }
 
     // TODO: Remove this.  ARP doesn't belong at this layer.
@@ -637,6 +644,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         // Check that the end of the segment is in the window, and trim it down if it is not.
         if *seg_len > 0 && *seg_end >= after_receive_window {
             let mut excess: u32 = u32::from(*seg_end - after_receive_window);
+            if excess == 0 {
+                return Ok(());
+            }
             excess += 1;
             // TODO: If we end up (after receive handling rewrite is complete) not needing seg_end and seg_len after
             // this, remove these two lines adjusting them as they're being computed needlessly.
@@ -839,11 +849,12 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         let seq_num: SeqNumber = self.get_send_next().get();
         header.seq_num = seq_num;
 
-        // TODO: Remove this if clause once emit() is fixed to not require the remote hardware addr (this should be
-        // left to the ARP layer and not exposed to TCP).
-        if let Some(remote_link_addr) = self.arp().try_query(self.remote.ip().clone()) {
-            self.emit(header, None, remote_link_addr);
-        }
+        // // TODO: Remove this if clause once emit() is fixed to not require the remote hardware addr (this should be
+        // // left to the ARP layer and not exposed to TCP).
+        // if let Some(remote_link_addr) = self.arp().try_query(self.remote.ip().clone()) {
+        //     self.emit(header, None, remote_link_addr);
+        // }
+        self.emit(header, None, self.get_remote_link_addr())
     }
 
     /// Transmit this message to our connected peer.
@@ -1062,9 +1073,9 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         // If the out-of-order store now contains too many entries, delete the later entries.
         // TODO: The out-of-order store is already limited (in size) by our receive window, while the below check
         // imposes a limit on the number of entries.  Do we need this?  Presumably for attack mitigation?
-        while self.out_of_order.len() > MAX_OUT_OF_ORDER {
-            self.out_of_order.pop_back();
-        }
+        // while self.out_of_order.len() > MAX_OUT_OF_ORDER {
+        //     self.out_of_order.pop_back();
+        // }
     }
 
     // This routine takes an incoming in-order TCP segment and adds the data to the user's receive queue.  If the new

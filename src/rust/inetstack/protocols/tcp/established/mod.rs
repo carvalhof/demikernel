@@ -91,12 +91,14 @@ impl<N: NetworkRuntime> EstablishedSocket<N> {
     ) -> Result<Self, Fail> {
         // TODO: Maybe add the queue descriptor here.
         let name_for_push = format!("Ring_TX_{:?}\0", remote);
+        let remote_link_addr = arp.try_query(remote.ip().clone()).unwrap();
         let cb = Box::into_raw(Box::new(SharedControlBlock::new(
             local,
             remote,
             runtime.clone(),
             transport.clone(),
             local_link_addr,
+            remote_link_addr,
             tcp_config,
             default_socket_options,
             arp,

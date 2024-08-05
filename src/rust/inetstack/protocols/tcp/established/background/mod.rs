@@ -25,24 +25,23 @@ use ::futures::{
 };
 
 pub async fn background<N: NetworkRuntime>(cb: *mut SharedControlBlock<N>, _dead_socket_tx: mpsc::UnboundedSender<QDesc>, transport: N) {
-    //let acknowledger = async_timer!("tcp::established::background::acknowledger", acknowledger(cb.clone())).fuse();
-    //pin_mut!(acknowledger);
+    let acknowledger = async_timer!("tcp::established::background::acknowledger", acknowledger(cb)).fuse();
+    pin_mut!(acknowledger);
 
-    //let retransmitter = async_timer!("tcp::established::background::retransmitter", retransmitter(cb.clone())).fuse();
-    //pin_mut!(retransmitter);
+    let retransmitter = async_timer!("tcp::established::background::retransmitter", retransmitter(cb)).fuse();
+    pin_mut!(retransmitter);
 
-    //let sender = async_timer!("tcp::established::background::sender", sender(cb.clone())).fuse();
-    //pin_mut!(sender);
+    let sender = async_timer!("tcp::established::background::sender", sender(cb)).fuse();
+    pin_mut!(sender);
 
-    // let mut cb2: SharedControlBlock<N> = cb.clone();
     let receiver = async_timer!("tcp::established::background::receiver", unsafe { (*cb).poll(transport) }).fuse();
     pin_mut!(receiver);
 
     let r = futures::select_biased! {
         r = receiver => r,
-        //r = acknowledger => r,
-        //r = retransmitter => r,
-        //r = sender => r,
+        r = acknowledger => r,
+        r = retransmitter => r,
+        r = sender => r,
     };
     error!("Connection terminated: {:?}", r);
 }

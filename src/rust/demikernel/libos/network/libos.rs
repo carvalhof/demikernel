@@ -428,16 +428,6 @@ impl<T: NetworkTransport> SharedNetworkLibOS<T> {
         };
 
         let cb: *mut crate::inetstack::protocols::tcp::established::ctrlblk::SharedControlBlock<crate::demikernel::libos::SharedDPDKRuntime> = unsafe { (*self.runtime.qd_to_cb).get_mut(qd).unwrap() };
-
-        // let mut queue: SharedNetworkQueue<T> = self.get_shared_queue(&qd)?;
-        // let coroutine_constructor = || -> Result<QToken, Fail> {
-        //     let coroutine = Box::pin(self.clone().push_coroutine(qd, buf, cb).fuse());
-        //     self.runtime
-        //         .clone()
-        //         .insert_io_coroutine("NetworkLibOS::push", coroutine)
-        // };
-
-        // queue.push(coroutine_constructor)
         let buf_ptr = buf.into_mbuf().unwrap();
         unsafe { (*(*cb).aux_push_queue).enqueue(buf_ptr).unwrap() };
         Ok(0.into())
