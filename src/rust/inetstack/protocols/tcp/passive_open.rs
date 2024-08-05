@@ -10,9 +10,10 @@ use crate::{
         async_queue::{
             AsyncQueue,
             SharedAsyncQueue,
-        },
+        }, 
+        async_value::SharedAsyncValue, 
         dpdk_ring2::DPDKRing2,
-        async_value::SharedAsyncValue,
+        dpdk_spinlock::DPDKSpinLock,
     },
     expect_some,
     inetstack::protocols::{
@@ -42,19 +43,13 @@ use crate::{
         },
     },
     runtime::{
-        conditional_yield_with_timeout,
-        fail::Fail,
-        memory::DemiBuffer,
-        network::{
+        conditional_yield_with_timeout, fail::Fail, memory::DemiBuffer, network::{
             config::TcpConfig,
             consts::MAX_WINDOW_SCALE,
             socket::option::TcpSocketOptions,
             types::MacAddress,
             NetworkRuntime,
-        },
-        QDesc,
-        SharedDemiRuntime,
-        SharedObject,
+        }, poll_yield, QDesc, SharedDemiRuntime, SharedObject
     },
     QToken,
 };
@@ -93,6 +88,7 @@ pub struct PassiveSocket<N: NetworkRuntime> {
     // TCP Connection State.
     state: SharedAsyncValue<State>,
     connections: HashMap<SocketAddrV4, SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>>,
+    connections2: HashMap<SocketAddrV4, *mut DPDKRing2>,
     recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
     ready: AsyncQueue<Result<EstablishedSocket<N>, Fail>>,
     max_backlog: usize,
@@ -109,6 +105,7 @@ pub struct PassiveSocket<N: NetworkRuntime> {
 
     background_task_qt: Option<QToken>,
     socket_queue: SharedAsyncQueue<SocketAddrV4>,
+    pub lock: *mut DPDKSpinLock,
 }
 
 #[derive(Clone)]
@@ -136,6 +133,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         let mut me: Self = Self(SharedObject::<PassiveSocket<N>>::new(PassiveSocket {
             state: SharedAsyncValue::new(State::Listening),
             connections: HashMap::<SocketAddrV4, SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>>::new(),
+            connections2: HashMap::<SocketAddrV4, *mut DPDKRing2>::new(),
             recv_queue,
             ready: AsyncQueue::<Result<EstablishedSocket<N>, Fail>>::default(),
             max_backlog,
@@ -150,11 +148,16 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             dead_socket_tx,
             background_task_qt: None,
             socket_queue,
+            lock: Box::into_raw(Box::new(DPDKSpinLock::new())),
         }));
         let qt: QToken =
             runtime.insert_background_coroutine("passive_listening::poll", Box::pin(me.clone().poll().fuse()))?;
         me.background_task_qt = Some(qt);
         Ok(me)
+    }
+
+    pub fn get_recv_queue(&self) -> SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)> {
+        self.recv_queue.clone()
     }
 
     /// Returns the address that the socket is bound to.
@@ -175,61 +178,54 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
 
     async fn poll(mut self) {
         loop {
-            let mut socket_queue: SharedAsyncQueue<SocketAddrV4> = self.socket_queue.clone();
-            let mut recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)> = self.recv_queue.clone();
-            let mut state: SharedAsyncValue<State> = self.state.clone();
-            // Remove sockets that have been closed.
-            futures::select! {
-                res = socket_queue.pop(None).fuse() => match res {
-                    Ok(socket) => match self.connections.remove(&socket) {
-                        Some(_recv_queue) => trace!("poll(): Closing socket"),
-                        None => unreachable!("poll(): should have a matching connection"),
-                    },
-                    Err(_) => continue,
-                },
-                result = recv_queue.pop(None).fuse() => {
-                    match result {
-                        Ok((ipv4_hdr, tcp_hdr, buf)) =>  {
-                                    let remote: SocketAddrV4 = SocketAddrV4::new(ipv4_hdr.get_src_addr(), tcp_hdr.src_port);
-                                    if let Some(recv_queue) = self.connections.get_mut(&remote) {
-                                        // Packet is either for an inflight request or established connection.
-                                        recv_queue.push((ipv4_hdr, tcp_hdr, buf));
-                                        continue;
-                                    }
-
-                                    // If not a SYN, then this packet is not for a new connection and we throw it away.
-                                    if !tcp_hdr.syn || tcp_hdr.ack || tcp_hdr.rst {
-                                        let cause: String = format!(
-                                            "invalid TCP flags (syn={}, ack={}, rst={})",
-                                            tcp_hdr.syn, tcp_hdr.ack, tcp_hdr.rst
-                                        );
-                                        warn!("poll(): {}", cause);
-                                        self.send_rst(&remote, tcp_hdr);
-                                        continue;
-                                    }
-
-                                    // Check if this SYN segment carries any data.
-                                    if !buf.is_empty() {
-                                        // RFC 793 allows connections to be established with data-carrying segments, but we do not support this.
-                                        // We simply drop the data and and proceed with the three-way handshake protocol, on the hope that the
-                                        // remote will retransmit the data after the connection is established.
-                                        // See: https://datatracker.ietf.org/doc/html/rfc793#section-3.4 fo more details.
-                                        warn!("Received SYN with data (len={})", buf.len());
-                                        // TODO: https://github.com/microsoft/demikernel/issues/1115
-                                    }
-
-                                    // Start a new connection.
-                                    self.handle_new_syn(remote, tcp_hdr);
-                        }
-                        Err(_) => continue,
-                    }
-                },
-                result = state.wait_for_change(None).fuse() => {
-                    if let Ok(result) = result {
-                        if result == State::Closed {return;}
-                    }
+            unsafe { (*self.lock).lock() };
+            let (ipv4_hdr, tcp_hdr, buf) = match self.recv_queue.try_pop() {
+                Some((ipv4_hdr, tcp_hdr, buf)) => (ipv4_hdr, tcp_hdr, buf),
+                None => {
+                    unsafe { (*self.lock).unlock() };
+                    poll_yield().await;
+                    continue;
                 }
+            };
+            unsafe { (*self.lock).unlock() };
+
+            let remote: SocketAddrV4 = SocketAddrV4::new(ipv4_hdr.get_src_addr(), tcp_hdr.src_port);
+            if buf.len() == 0 {
+                if let Some(recv_queue) = self.connections.get_mut(&remote) {
+                    // Packet is either for an inflight request or established connection.
+                    recv_queue.push((ipv4_hdr, tcp_hdr, buf));
+                    continue;
+                }
+            } else {
+                if let Some(aux_pop_queue) = self.connections2.get_mut(&remote) {
+                    let _ = unsafe { (*(*aux_pop_queue)).enqueue((ipv4_hdr, tcp_hdr, buf)) };
+                }
+                continue;
             }
+
+            // If not a SYN, then this packet is not for a new connection and we throw it away.
+            if !tcp_hdr.syn || tcp_hdr.ack || tcp_hdr.rst {
+                let cause: String = format!(
+                    "invalid TCP flags (syn={}, ack={}, rst={})",
+                    tcp_hdr.syn, tcp_hdr.ack, tcp_hdr.rst
+                );
+                warn!("poll(): {}", cause);
+                self.send_rst(&remote, tcp_hdr);
+                continue;
+            }
+
+            // Check if this SYN segment carries any data.
+            if !buf.is_empty() {
+                // RFC 793 allows connections to be established with data-carrying segments, but we do not support this.
+                // We simply drop the data and and proceed with the three-way handshake protocol, on the hope that the
+                // remote will retransmit the data after the connection is established.
+                // See: https://datatracker.ietf.org/doc/html/rfc793#section-3.4 fo more details.
+                warn!("Received SYN with data (len={})", buf.len());
+                // TODO: https://github.com/microsoft/demikernel/issues/1115
+            }
+
+            // Start a new connection.
+            self.handle_new_syn(remote, tcp_hdr);
         }
     }
 
@@ -259,9 +255,10 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         let recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)> =
             SharedAsyncQueue::<(Ipv4Header, TcpHeader, DemiBuffer)>::default();
         let ack_queue: SharedAsyncQueue<usize> = SharedAsyncQueue::<usize>::default();
+        let lock: *mut DPDKSpinLock = Box::into_raw(Box::new(DPDKSpinLock::new()));
         let future = self
             .clone()
-            .send_syn_ack_and_wait_for_ack(remote, remote_isn, local_isn, tcp_hdr, recv_queue.clone(), ack_queue)
+            .send_syn_ack_and_wait_for_ack(remote, remote_isn, local_isn, tcp_hdr, recv_queue.clone(), ack_queue, lock)
             .fuse();
         match self
             .runtime
@@ -276,6 +273,12 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         };
         // TODO: Clean up the connections table once we have merged all of the routing tables into one.
         self.connections.insert(remote, recv_queue);
+        {
+            let name_for_pop = format!("Ring_RX_{:?}\0", remote);
+            let aux_pop_queue = Box::into_raw(Box::new(DPDKRing2::new(name_for_pop, 1024*1024)));
+
+            self.connections2.insert(remote, aux_pop_queue);
+        }
     }
 
     /// Sends a RST segment to `remote`.
@@ -342,6 +345,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         tcp_hdr: TcpHeader,
         recv_queue: SharedAsyncQueue<(Ipv4Header, TcpHeader, DemiBuffer)>,
         ack_queue: SharedAsyncQueue<usize>,
+        lock: *mut DPDKSpinLock,
     ) {
         // Set up new inflight accept connection.
         let mut remote_window_scale = None;
@@ -382,6 +386,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
                 tcp_hdr.window_size,
                 remote_window_scale,
                 mss,
+                lock,
             );
 
             // Either we get an ack or a timeout.
@@ -452,6 +457,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
         header_window_size: u16,
         remote_window_scale: Option<u8>,
         mss: usize,
+        lock: *mut DPDKSpinLock,
     ) -> Result<EstablishedSocket<N>, Fail> {
         let (ipv4_hdr, tcp_hdr, buf) = recv_queue.pop(None).await?;
         debug!("Received ACK: {:?}", tcp_hdr);
@@ -504,7 +510,7 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             recv_queue.push((ipv4_hdr, tcp_hdr, buf));
         }
 
-        let name_for_pop = format!("Ring_RX_{:?}\0", remote);
+        let aux_pop_queue = *self.connections2.get(&remote).unwrap();
 
         let new_socket: EstablishedSocket<N> = EstablishedSocket::<N>::new(
             self.local,
@@ -529,8 +535,8 @@ impl<N: NetworkRuntime> SharedPassiveSocket<N> {
             None,
             self.dead_socket_tx.clone(),
             Some(self.socket_queue.clone()),
-            Box::into_raw(Box::new(crate::collections::dpdk_spinlock::DPDKSpinLock::new())),
-            Box::into_raw(Box::new(DPDKRing2::new(name_for_pop, 1024*1024))),
+            lock,
+            aux_pop_queue,
         )?;
 
         Ok(new_socket)

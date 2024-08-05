@@ -21,20 +21,20 @@ use ::std::time::{
     Instant,
 };
 
-pub async fn retransmitter<N: NetworkRuntime>(mut cb: SharedControlBlock<N>) -> Result<Never, Fail> {
+pub async fn retransmitter<N: NetworkRuntime>(cb: *mut SharedControlBlock<N>) -> Result<Never, Fail> {
     // Watch the retransmission deadline.
-    let mut rtx_deadline_watched: SharedAsyncValue<Option<Instant>> = cb.watch_retransmit_deadline();
+    let mut rtx_deadline_watched: SharedAsyncValue<Option<Instant>> = unsafe { (*cb).watch_retransmit_deadline() };
     // Watch the fast retransmit flag.
-    let mut rtx_fast_retransmit_watched: SharedAsyncValue<bool> = cb.congestion_control_watch_retransmit_now_flag();
+    let mut rtx_fast_retransmit_watched: SharedAsyncValue<bool> = unsafe { (*cb).congestion_control_watch_retransmit_now_flag() };
     loop {
         let rtx_deadline: Option<Instant> = rtx_deadline_watched.get();
         let rtx_fast_retransmit: bool = rtx_fast_retransmit_watched.get();
         if rtx_fast_retransmit {
             // Notify congestion control about fast retransmit.
-            cb.congestion_control_on_fast_retransmit();
+            unsafe { (*cb).congestion_control_on_fast_retransmit() };
 
             // Retransmit earliest unacknowledged segment.
-            cb.retransmit();
+            unsafe { (*cb).retransmit() };
             continue;
         }
 
@@ -54,19 +54,19 @@ pub async fn retransmitter<N: NetworkRuntime>(mut cb: SharedControlBlock<N>) -> 
                 // Notify congestion control about RTO.
                 // TODO: Is this the best place for this?
                 // TODO: Why call into ControlBlock to get SND.UNA when congestion_control_on_rto() has access to it?
-                let send_unacknowledged = cb.get_send_unacked();
-                cb.congestion_control_on_rto(send_unacknowledged.get());
+                let send_unacknowledged = unsafe { (*cb).get_send_unacked() };
+                unsafe { (*cb).congestion_control_on_rto(send_unacknowledged.get()) };
 
                 // RFC 6298 Section 5.4: Retransmit earliest unacknowledged segment.
-                cb.retransmit();
+                unsafe { (*cb).retransmit() };
 
                 // RFC 6298 Section 5.5: Back off the retransmission timer.
-                cb.clone().rto_back_off();
+                unsafe { (*cb).clone().rto_back_off() };
 
                 // RFC 6298 Section 5.6: Restart the retransmission timer with the new RTO.
-                let rto: Duration = cb.rto();
-                let deadline: Instant = cb.get_now() + rto;
-                cb.set_retransmit_deadline(Some(deadline));
+                let rto: Duration = unsafe { (*cb).rto() };
+                let deadline: Instant = unsafe { (*cb).get_now() } + rto;
+                unsafe { (*cb).set_retransmit_deadline(Some(deadline)) };
             },
             Err(_) => {
                 unreachable!(

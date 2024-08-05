@@ -356,11 +356,19 @@ impl<N: NetworkRuntime> SharedTcpSocket<N> {
     pub fn receive(&mut self, ip_hdr: Ipv4Header, tcp_hdr: TcpHeader, buf: DemiBuffer) {
         // If this queue has an allocated receive queue, then direct the packet there.
         match self.state {
+            SocketState::Listening(ref mut socket) => {
+                log::warn!("Pushing on Passive...");
+                unsafe {
+                    (*socket.lock).lock();
+                    socket.get_recv_queue().push((ip_hdr, tcp_hdr, buf));
+                    (*socket.lock).unlock();
+                }
+            },
             SocketState::Established(ref mut socket) => {
                 log::warn!("Pushing on Established...");
                 unsafe {
 
-                    let ip_hdr_ptr: *mut Ipv4Header = std::ptr::null_mut(); //Box::into_raw(Box::new(ip_hdr));
+                    let ip_hdr_ptr: *mut Ipv4Header = std::ptr::null_mut();
                     let tcp_hdr_ptr = Box::into_raw(Box::new(tcp_hdr));
                     let buf_ptr = buf.into_mbuf().unwrap();
 
