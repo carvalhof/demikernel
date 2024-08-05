@@ -189,6 +189,7 @@ pub struct ControlBlock<N: NetworkRuntime> {
     #[allow(unused)]
     runtime: SharedDemiRuntime,
     local_link_addr: MacAddress,
+    remote_link_addr: MacAddress,
     tcp_config: TcpConfig,
     socket_options: TcpSocketOptions,
 
@@ -262,6 +263,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         runtime: SharedDemiRuntime,
         transport: N,
         local_link_addr: MacAddress,
+        remote_link_addr: MacAddress,
         tcp_config: TcpConfig,
         default_socket_options: TcpSocketOptions,
         arp: SharedArpPeer<N>,
@@ -289,6 +291,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
             runtime,
             transport,
             local_link_addr,
+            remote_link_addr,
             tcp_config,
             socket_options: default_socket_options,
             arp,
@@ -319,6 +322,10 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
 
     pub fn get_remote(&self) -> SocketAddrV4 {
         self.remote
+    }
+
+    pub fn get_remote_link_addr(&self) -> MacAddress {
+        self.remote_link_addr
     }
 
     // TODO: Remove this.  ARP doesn't belong at this layer.
@@ -811,11 +818,7 @@ impl<N: NetworkRuntime> SharedControlBlock<N> {
         let seq_num: SeqNumber = self.get_send_next().get();
         header.seq_num = seq_num;
 
-        // TODO: Remove this if clause once emit() is fixed to not require the remote hardware addr (this should be
-        // left to the ARP layer and not exposed to TCP).
-        if let Some(remote_link_addr) = self.arp().try_query(self.remote.ip().clone()) {
-            self.emit(header, None, remote_link_addr);
-        }
+        self.emit(header, None, self.get_remote_link_addr())
     }
 
     /// Transmit this message to our connected peer.
