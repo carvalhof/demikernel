@@ -12,8 +12,8 @@ use crate::{
 use ::futures::never::Never;
 use ::std::time::Instant;
 
-pub async fn acknowledger<N: NetworkRuntime>(mut cb: SharedControlBlock<N>) -> Result<Never, Fail> {
-    let mut ack_deadline: SharedAsyncValue<Option<Instant>> = cb.get_ack_deadline();
+pub async fn acknowledger<N: NetworkRuntime>(cb: *mut SharedControlBlock<N>) -> Result<Never, Fail> {
+    let mut ack_deadline: SharedAsyncValue<Option<Instant>> = unsafe { (*cb).get_ack_deadline() };
     let mut deadline: Option<Instant> = ack_deadline.get();
     loop {
         // TODO: Implement TCP delayed ACKs, subject to restrictions from RFC 1122
@@ -27,7 +27,7 @@ pub async fn acknowledger<N: NetworkRuntime>(mut cb: SharedControlBlock<N>) -> R
                 continue;
             },
             Err(Fail { errno, cause: _ }) if errno == libc::ETIMEDOUT => {
-                cb.send_ack();
+                unsafe { (*cb).send_ack() };
                 deadline = ack_deadline.get();
             },
             Err(_) => {
